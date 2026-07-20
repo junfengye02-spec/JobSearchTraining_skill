@@ -1,0 +1,7 @@
+interface:
+  display_name: "Adaptive Interview Coach"
+  short_description: "Discover jobs, train interviews, and review weaknesses"
+  default_prompt: "Use $adaptive-interview-coach to initialize my job search, daily interview training, and weakness review workflow."
+
+policy:
+  allow_implicit_invocation: true
