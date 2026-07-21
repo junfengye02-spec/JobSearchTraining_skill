@@ -2,6 +2,18 @@
 
 Use Codex app task and automation tools when available. If they are unavailable, keep the same workflow runnable manually and explain that scheduled delivery requires a supporting Codex surface.
 
+## One-command startup
+
+When the user says `开始skill`, perform setup immediately and end to end:
+
+1. Initialize or inspect the current workspace.
+2. Run one job refresh before scheduling future refreshes.
+3. Create or update both exact-name automations.
+4. Create or reuse the current-period interview task, pin it, and ask its first question.
+5. Return concrete created or reused task and automation results.
+
+Do not ask for values already available in the resume, existing workbook, config, or environment. Only pause when the target role cannot be inferred because no readable resume or equivalent profile data exists.
+
 ## Initialize automations
 
 1. Read the configured timezone, job refresh time, interview time, and task span.
@@ -53,3 +65,4 @@ The job workbook and weakness workbook remain in the workspace and are never rot
 - Never create one interview task per day.
 - Never archive the old task until the new task exists and the automation target is updated.
 - If the previous question is unanswered, send a concise continuation prompt instead of stacking another question.
+- Repeating `开始skill` must repair or reuse the workflow and must not reset job state, weakness history, or the current interview period.

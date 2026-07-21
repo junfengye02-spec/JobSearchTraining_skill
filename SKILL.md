@@ -1,6 +1,6 @@
 ---
 name: adaptive-interview-coach
-description: End-to-end job discovery and adaptive interview training that reads the latest resume, finds and verifies matching jobs, maintains one formatted job Excel workbook, asks duty-specific interview questions, teaches detected weaknesses before continuing, records mastery in a review Excel workbook, schedules daily runs, and rotates interview tasks after a configured number of days. Use when Codex should initialize or run a personal job-search pipeline, refresh campus or experienced-hire postings, create or update job and weakness spreadsheets, conduct resume-and-JD-based mock interviews, review weak knowledge areas, or manage the recurring interview task lifecycle.
+description: End-to-end job discovery and adaptive interview training that reads the latest resume, finds and verifies matching jobs, maintains one formatted job Excel workbook, asks duty-specific interview questions, teaches detected weaknesses before continuing, records mastery in a review Excel workbook, schedules daily runs, and rotates interview tasks after a configured number of days. Use when the user says "开始skill", "start skill", "start everything", or asks Codex to initialize or run a personal job-search pipeline, refresh campus or experienced-hire postings, create or update job and weakness spreadsheets, conduct resume-and-JD-based mock interviews, review weak knowledge areas, or manage the recurring interview task lifecycle.
 ---
 
 # Adaptive Interview Coach
@@ -17,18 +17,41 @@ This Skill is self-contained. Do not require another Skill for browsing, spreads
 
 ## Route the request
 
+- For “开始skill”, “start skill”, or an equivalent request, follow **One-command bootstrap** and complete the workflow end to end in the same turn.
 - For first use or “set this up,” follow **Initialize the workspace**, then **Create the recurring workflow**.
 - For “find jobs,” “refresh jobs,” or an unattended job automation, follow **Refresh jobs**.
 - For “interview me” or a daily interview automation, follow **Run the interview loop**.
 - For an answer that exposes a weakness, follow **Teach and record weaknesses** before asking anything new.
 - For status questions, run the status and summary commands without mutating data.
 
+## One-command bootstrap
+
+Treat `开始skill` as authorization to complete all reversible, workspace-local setup and supported Codex task/automation creation. Do not stop after explaining the workflow or presenting a plan.
+
+1. Use the current project root as `WORKSPACE` unless the user already selected another directory.
+2. Look for an existing config. If it exists, preserve it and repair only missing workbooks, tasks, or automations.
+3. Locate the latest readable resume. Also inspect an existing job workbook when present.
+4. Infer the initial profile from those files:
+   - graduation cohort or experienced-hire status from education and dates;
+   - role directions and programming language from projects, experience, skills, and existing job duties;
+   - include internships when the resume clearly represents a current student or target graduate;
+   - reuse explicit location and organization preferences from existing files; otherwise search nationwide without inventing a preferred city;
+   - infer the current recruitment season conservatively, leaving uncertain labels empty rather than fabricating them.
+5. Derive positive, fuzzy, and negative keywords, then run **Initialize the workspace** without asking the user to repeat information already present in the files.
+6. Immediately run one **Refresh jobs** cycle. If a web source is unavailable, continue with other sources and do not block the remaining setup.
+7. Run **Create the recurring workflow**: create or update the job refresh automation, create and pin the current interview task, attach the daily interview automation, and ask the first question in that task.
+8. Finish with the generated file paths, automation times, interview task identity, and job refresh counts.
+
+Ask a blocking question only when no readable resume exists and neither an existing config nor job workbook provides enough information to determine a target role. In that case, ask the user to add or identify a resume, then resume this bootstrap from the interrupted step.
+
+Make this operation idempotent. Repeating `开始skill` must update or reuse exact-name automations and the current-period task, not create duplicates or erase state.
+
 ## Initialize the workspace
 
 Read [runtime-schema.md](references/runtime-schema.md) and [automation-setup.md](references/automation-setup.md).
 
 1. Check whether `WORKSPACE/.adaptive-interview-coach/config.json` exists.
-2. If it does not exist in an interactive task, collect the essential profile:
+2. If it does not exist in an interactive task, first infer the essential profile from the latest resume and existing job workbook. Ask only for values that cannot be inferred safely:
    - target graduation cohort or experienced-hire status;
    - target season;
    - role directions in plain language;
@@ -50,7 +73,7 @@ python "$SKILL_DIR/scripts/workspace.py" init --workspace "$WORKSPACE" \
 
 Omit `--include-internships` when not selected. Never use `--force` unless the user explicitly authorizes replacing an existing configuration.
 
-If initialization is requested by an unattended automation and no config exists, stop and report that one interactive initialization is required. Do not guess a career profile.
+If initialization is requested by an unattended automation and no config exists, stop and report that one interactive initialization or `开始skill` run is required. Do not guess a career profile in an unattended task.
 
 After initialization, confirm that the one job workbook and one weakness workbook exist. If `openpyxl` is missing, install that dependency in the user's Python environment or an isolated runtime directory, then retry; do not copy third-party source code into the Skill.
 
@@ -147,6 +170,8 @@ When task and automation tools are available:
 2. Create the current interactive interview task, ask its first question, title it with its period and date range, and pin it.
 3. Create or update one daily interview automation targeted at that task using the configured interview time.
 4. On the first run outside the configured task span, create the next task, carry forward covered topics and unresolved weaknesses, retarget the interview automation, then archive the old task.
+
+During **One-command bootstrap**, execute all four actions now. Do not merely describe commands the user could run later.
 
 Resolve existing automation and task IDs at runtime. Never embed IDs in the Skill or create duplicates with the same exact name.
 
