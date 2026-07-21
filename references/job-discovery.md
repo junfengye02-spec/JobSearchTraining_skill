@@ -20,9 +20,10 @@ Prefer direct job-detail URLs over home pages or search result pages. Avoid repe
 5. Compare duties with the latest resume and fill `match_level`, `match_reason`, and `skill_gaps` with evidence, not generic praise.
 6. Write candidates to a temporary JSON file inside `.adaptive-interview-coach/tmp/`.
 7. Run `scripts/jobs.py merge` to filter and deduplicate.
-8. Recheck existing active jobs. Deactivate only records with supported explicit evidence.
-9. Run `scripts/jobs.py export` to rebuild the one configured job workbook in place.
-10. Report new, deactivated, rejected, and active totals even when no new jobs were found.
+8. Recompute the duty profile from every active job. Include current new job IDs, cluster similar requirements, map clusters to the latest resume, and run `scripts/jobs.py profile`.
+9. Recheck existing active jobs. Deactivate only records with supported explicit evidence. If deactivation changes the active set, recompute the profile again.
+10. Run `scripts/jobs.py export` to rebuild the one configured job workbook, including its `职责画像` sheet, in place.
+11. Report new, deactivated, rejected, active, and duty-profile cluster totals even when no new jobs were found.
 
 ## Matching guidance
 
@@ -39,6 +40,7 @@ Use `高度匹配` only when multiple important duties have direct resume eviden
 
 - Maintain one `岗位总表.xlsx` unless the user configured another filename.
 - Keep `岗位名称` and `岗位职责` as the first two columns of the main sheet.
+- Rebuild `职责画像` from all active duties after every refresh; let today's new jobs change its coverage, priority, and trend.
 - Keep active and deactivated jobs auditable in separate sheets.
 - Preserve clickable source links.
 - Never create a fallback copy when Excel has locked the workbook. Report the lock and retry on the next run.

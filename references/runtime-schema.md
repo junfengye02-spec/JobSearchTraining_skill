@@ -51,11 +51,33 @@ Pass an array to `scripts/jobs.py deactivate`. Each item contains a job identifi
 
 Temporary errors, authentication walls, rate limits, CAPTCHAs, timeouts, and ambiguous pages are not deactivation evidence.
 
+## Duty profile schema
+
+After every job merge, summarize all active responsibilities and pass one JSON object to `scripts/jobs.py profile`:
+
+- `new_job_ids`: job IDs discovered in the current refresh. These drive daily change explanations.
+- `clusters`: semantically grouped responsibility requirements.
+
+Each cluster contains:
+
+- `category`: stable capability category.
+- `summary`: faithful normalized summary of related responsibilities.
+- `frequency`: number of active jobs containing this requirement.
+- `priority`: interview priority based on frequency, match, and role importance.
+- `keywords`: representative technologies and concepts.
+- `companies`: representative companies.
+- `representative_job_ids` or `representative_jobs`: traceable examples.
+- `resume_evidence`: current resume evidence meeting the summarized duty.
+- `resume_gap`: missing, weak, or unverified evidence.
+- `new_job_influence`: how today's new jobs changed this cluster.
+
+The script calculates coverage and compares the previous snapshot to mark clusters `新增`, `上升`, `稳定`, or `下降`. Recompute from the full active set every day instead of appending only new duties.
+
 ## Weakness upsert schema
 
 Pass an object or array to `scripts/weaknesses.py upsert` with:
 
-- `category`, `topic`, `source`, `weakness`.
+- `category`, `topic`, `source`, `weakness`. Format `source` with the duty profile generation time, cluster summary, representative jobs, and corresponding resume evidence or gap.
 - `correct_conclusion`, `explanation`, `example`.
 - `answer_framework`, `keywords`, `traps`.
 - `confirmation_question`, `user_answer`.

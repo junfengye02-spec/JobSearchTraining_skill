@@ -102,6 +102,12 @@ def cmd_init(args: argparse.Namespace) -> int:
                 "schema_version": 1,
                 "updated_at": None,
                 "jobs": {},
+                "duty_profile": {
+                    "generated_at": None,
+                    "source_job_count": 0,
+                    "new_job_ids": [],
+                    "clusters": [],
+                },
             },
         )
 

@@ -41,6 +41,10 @@ HEADERS = [
     "来源平台", "岗位链接", "首次发现", "最近确认", "截止日期", "届别",
     "招聘季节", "状态", "失效原因",
 ]
+PROFILE_HEADERS = [
+    "职责类别", "归纳职责", "出现岗位数", "覆盖比例", "优先级", "趋势", "关键词",
+    "代表公司", "代表岗位", "简历已有证据", "简历能力缺口", "新增岗位影响", "画像更新时间",
+]
 
 NAVY = "18324A"
 TEAL = "0F766E"
@@ -341,6 +345,111 @@ def cmd_deactivate(args: argparse.Namespace) -> int:
     return 0
 
 
+def list_text(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [as_text(item) for item in value if as_text(item)]
+    text = as_text(value)
+    return [text] if text else []
+
+
+def profile_key(cluster: dict) -> str:
+    return f"{normalize_text(cluster.get('category'))}|{normalize_text(cluster.get('summary'))}"
+
+
+def build_duty_profile(state: dict, value: object) -> dict:
+    if not isinstance(value, dict):
+        raise SystemExit("Duty profile input must be a JSON object.")
+    clusters = value.get("clusters", [])
+    if not isinstance(clusters, list):
+        raise SystemExit("Duty profile input must contain a clusters array.")
+
+    active_jobs = {
+        job_id: record
+        for job_id, record in state.get("jobs", {}).items()
+        if record.get("active", True) and as_text(record.get("responsibilities"))
+    }
+    active_count = len(active_jobs)
+    previous = state.get("duty_profile", {})
+    previous_by_key = {
+        profile_key(cluster): cluster
+        for cluster in previous.get("clusters", [])
+        if isinstance(cluster, dict)
+    }
+    requested_new_ids = list_text(value.get("new_job_ids"))
+    new_job_ids = [job_id for job_id in requested_new_ids if job_id in active_jobs]
+    cleaned = []
+
+    for raw in clusters:
+        if not isinstance(raw, dict):
+            continue
+        category = as_text(raw.get("category"))
+        summary = as_text(raw.get("summary"))
+        if not category or not summary:
+            continue
+        try:
+            frequency = int(raw.get("frequency", 0))
+        except (TypeError, ValueError):
+            frequency = 0
+        frequency = max(0, min(frequency, active_count))
+        representative_ids = [job_id for job_id in list_text(raw.get("representative_job_ids")) if job_id in active_jobs]
+        representative_jobs = list_text(raw.get("representative_jobs"))
+        if representative_ids:
+            representative_jobs = [
+                f"{active_jobs[job_id].get('company', '')}｜{active_jobs[job_id].get('title', '')}"
+                for job_id in representative_ids
+            ]
+        companies = list_text(raw.get("companies"))
+        if not companies and representative_ids:
+            companies = list(dict.fromkeys(as_text(active_jobs[job_id].get("company")) for job_id in representative_ids))
+        cluster = {
+            "category": category,
+            "summary": summary,
+            "frequency": frequency,
+            "coverage": round(frequency / active_count, 4) if active_count else 0,
+            "priority": as_text(raw.get("priority")) or "中",
+            "keywords": list_text(raw.get("keywords")),
+            "companies": companies,
+            "representative_job_ids": representative_ids,
+            "representative_jobs": representative_jobs,
+            "resume_evidence": as_text(raw.get("resume_evidence")),
+            "resume_gap": as_text(raw.get("resume_gap")),
+            "new_job_influence": as_text(raw.get("new_job_influence")),
+        }
+        old = previous_by_key.get(profile_key(cluster))
+        if not old:
+            trend = "新增"
+        else:
+            old_frequency = int(old.get("frequency", 0) or 0)
+            trend = "上升" if frequency > old_frequency else "下降" if frequency < old_frequency else "稳定"
+        cluster["trend"] = trend
+        cleaned.append(cluster)
+
+    cleaned.sort(key=lambda item: (-item["frequency"], normalize_text(item["category"]), normalize_text(item["summary"])))
+    return {
+        "generated_at": now_iso(),
+        "source_job_count": active_count,
+        "new_job_ids": new_job_ids,
+        "clusters": cleaned,
+    }
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    workspace = Path(args.workspace).expanduser().resolve()
+    config = load_config(workspace)
+    state = load_state(workspace, config)
+    value = read_json(Path(args.input).expanduser().resolve(), {})
+    state["duty_profile"] = build_duty_profile(state, value)
+    save_state(workspace, state, config)
+    profile = state["duty_profile"]
+    print(json.dumps({
+        "source_job_count": profile["source_job_count"],
+        "new_job_count": len(profile["new_job_ids"]),
+        "clusters": len(profile["clusters"]),
+        "generated_at": profile["generated_at"],
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
 def location_rank(city: str, config: dict) -> int:
     preferences = config.get("profile", {}).get("location_preferences", [])
     for index, location in enumerate(preferences):
@@ -443,7 +552,54 @@ def add_job_sheet(workbook: Workbook, name: str, records: list[dict], config: di
         sheet.add_table(table)
 
 
-def add_overview(workbook: Workbook, config: dict, active: list[dict], inactive: list[dict]) -> None:
+def add_profile_sheet(workbook: Workbook, duty_profile: dict) -> None:
+    sheet = workbook.create_sheet("职责画像")
+    sheet.append(PROFILE_HEADERS)
+    generated_at = as_text(duty_profile.get("generated_at"))
+    for cluster in duty_profile.get("clusters", []):
+        sheet.append([
+            as_text(cluster.get("category")),
+            as_text(cluster.get("summary")),
+            int(cluster.get("frequency", 0) or 0),
+            float(cluster.get("coverage", 0) or 0),
+            as_text(cluster.get("priority")),
+            as_text(cluster.get("trend")),
+            as_text(cluster.get("keywords")),
+            as_text(cluster.get("companies")),
+            as_text(cluster.get("representative_jobs")),
+            as_text(cluster.get("resume_evidence")),
+            as_text(cluster.get("resume_gap")),
+            as_text(cluster.get("new_job_influence")),
+            generated_at,
+        ])
+    for cell in sheet[1]:
+        cell.fill = PatternFill("solid", fgColor=NAVY)
+        cell.font = Font(color=WHITE, bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = Border(bottom=Side(style="medium", color=TEAL))
+    sheet.row_dimensions[1].height = 32
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.border = Border(bottom=THIN)
+        row[3].number_format = "0.0%"
+        row[0].font = Font(bold=True, color=NAVY)
+        if row[5].value == "新增" or row[5].value == "上升":
+            row[5].fill = PatternFill("solid", fgColor=ORANGE)
+        sheet.row_dimensions[row[0].row].height = 76
+    widths = [20, 60, 14, 14, 12, 12, 28, 28, 38, 42, 42, 42, 24]
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    sheet.freeze_panes = "B2"
+    sheet.sheet_view.showGridLines = False
+    sheet.auto_filter.ref = sheet.dimensions
+    if duty_profile.get("clusters"):
+        table = Table(displayName="DutyProfile", ref=f"A1:M{len(duty_profile['clusters']) + 1}")
+        table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=False)
+        sheet.add_table(table)
+
+
+def add_overview(workbook: Workbook, config: dict, active: list[dict], inactive: list[dict], duty_profile: dict) -> None:
     sheet = workbook.create_sheet("概览")
     sheet.sheet_view.showGridLines = False
     sheet.column_dimensions["A"].width = 26
@@ -458,7 +614,9 @@ def add_overview(workbook: Workbook, config: dict, active: list[dict], inactive:
         ("包含实习", "是" if profile.get("include_internships") else "否"),
         ("有效岗位数", len(active)),
         ("已失效岗位数", len(inactive)),
-        ("使用说明", "面试训练优先读取“岗位总表”中的岗位职责、匹配依据和能力缺口。投递前仍需打开来源链接确认。"),
+        ("职责画像条目", len(duty_profile.get("clusters", []))),
+        ("职责画像更新时间", as_text(duty_profile.get("generated_at"))),
+        ("使用说明", "面试训练优先读取每天重算的“职责画像”，再结合最新简历出题。投递前仍需打开岗位来源链接确认。"),
     ]
     for row in rows:
         sheet.append(row)
@@ -495,11 +653,13 @@ def export_workbook(workspace: Path) -> Path:
     records = list(state.get("jobs", {}).values())
     active = [item for item in records if item.get("active", True)]
     inactive = [item for item in records if not item.get("active", True)]
+    duty_profile = state.get("duty_profile", {"clusters": []})
     workbook = Workbook()
     workbook.remove(workbook.active)
     add_job_sheet(workbook, "岗位总表", active, config, "ActiveJobs")
+    add_profile_sheet(workbook, duty_profile)
     add_job_sheet(workbook, "已失效岗位", inactive, config, "InactiveJobs")
-    add_overview(workbook, config, active, inactive)
+    add_overview(workbook, config, active, inactive, duty_profile)
     output = resolve_config_path(workspace, config["files"]["job_workbook"])
     save_workbook(workbook, output)
     load_workbook(output, read_only=True).close()
@@ -524,9 +684,12 @@ def state_summary(workspace: Path) -> dict:
     config = load_config(workspace)
     state = load_state(workspace, config)
     values = list(state.get("jobs", {}).values())
+    duty_profile = state.get("duty_profile", {})
     return {
         "active": sum(1 for item in values if item.get("active", True)),
         "inactive": sum(1 for item in values if not item.get("active", True)),
+        "duty_profile_clusters": len(duty_profile.get("clusters", [])),
+        "duty_profile_updated_at": duty_profile.get("generated_at"),
         "updated_at": state.get("updated_at"),
     }
 
@@ -551,6 +714,11 @@ def parser() -> argparse.ArgumentParser:
     deactivate.add_argument("--workspace", required=True)
     deactivate.add_argument("--input", required=True)
     deactivate.set_defaults(func=cmd_deactivate)
+
+    profile = sub.add_parser("profile", help="Replace the aggregated duty profile after each job refresh")
+    profile.add_argument("--workspace", required=True)
+    profile.add_argument("--input", required=True)
+    profile.set_defaults(func=cmd_profile)
 
     export = sub.add_parser("export", help="Rebuild the single formatted job workbook")
     export.add_argument("--workspace", required=True)

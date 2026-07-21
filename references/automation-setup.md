@@ -30,7 +30,7 @@ Create a project-scoped recurring local job. Its prompt must:
 - Invoke `$adaptive-interview-coach` in unattended refresh mode.
 - Read the current workspace config and latest resume.
 - Follow `job-discovery.md` without waiting for user input.
-- Merge, safely deactivate, and export the one job workbook.
+- Merge jobs, rebuild the duty profile with today's new-job influence, safely deactivate, and export the one job workbook.
 - Report counts even when nothing changed.
 
 Do not attach job discovery to the interactive interview task; long searches should not clutter interview history.
@@ -44,6 +44,8 @@ Attach a daily proactive automation to that task. On each run:
 - Continue an unresolved answer, explanation, or confirmation before starting a new question.
 - Read current files again.
 - Avoid repeating covered topics.
+- Select a current duty-profile cluster and map it to the latest resume before creating a new question.
+- Preserve the profile version, cluster, representative jobs, and resume evidence in follow-ups and weakness records.
 - Ask only one main question.
 
 ## Rotate after the configured span

@@ -98,13 +98,21 @@ python "$SKILL_DIR/scripts/jobs.py" merge --workspace "$WORKSPACE" \
   --rejected-output "<rejected.json>"
 ```
 
-6. Recheck active jobs. Deactivate only when an official deadline has passed, the job is explicitly closed/removed, the page returns 404/410, or an authoritative source proves it no longer exists. Temporary network errors, authentication, CAPTCHAs, throttling, and ambiguity are not evidence. Use:
+6. After every merge, rebuild a dynamic duty profile from all active job responsibilities. Cluster similar duties, count job coverage, map each cluster to resume evidence and gaps, and explain how today's new jobs changed its emphasis. Save it before export:
+
+```text
+python "$SKILL_DIR/scripts/jobs.py" profile --workspace "$WORKSPACE" --input "<duty-profile.json>"
+```
+
+Include the current run's new job IDs and a `clusters` array following [runtime-schema.md](references/runtime-schema.md). Recompute from the complete active set every day; do not merely append new duties to yesterday's summary.
+
+7. Recheck active jobs. Deactivate only when an official deadline has passed, the job is explicitly closed/removed, the page returns 404/410, or an authoritative source proves it no longer exists. Temporary network errors, authentication, CAPTCHAs, throttling, and ambiguity are not evidence. Use:
 
 ```text
 python "$SKILL_DIR/scripts/jobs.py" deactivate --workspace "$WORKSPACE" --input "<deactivations.json>"
 ```
 
-7. Rebuild the configured workbook in place:
+8. Rebuild the configured workbook in place:
 
 ```text
 python "$SKILL_DIR/scripts/jobs.py" export --workspace "$WORKSPACE"
@@ -121,12 +129,18 @@ Read [interview-loop.md](references/interview-loop.md).
 Before each new question:
 
 1. Re-read the latest resume.
-2. Read active jobs from the configured job workbook or job state.
+2. Read the current `职责画像`, regenerated from all active jobs after the latest refresh. Read representative jobs when source detail is needed.
 3. Read recent task history and weakness status.
 4. If a prior answer, explanation, or confirmation is incomplete, continue it instead of asking a new main question.
-5. Otherwise select one high-value duty from a highly matched job and connect it to resume evidence, foundational knowledge, algorithms, system design, or a recent public interview trend.
+5. Otherwise select one high-priority duty cluster not covered recently. Prefer clusters marked `新增` or `上升` when today's jobs changed demand.
+6. Map the summarized duty to one resume project, skill claim, quantified result, missing capability, or weak point. Build the question from this duty-profile-to-resume relationship.
+7. Record the profile generation time, cluster, representative jobs, and resume evidence or gap so follow-ups and weakness records retain provenance.
 
-Ask exactly one main question. Do not show the answer before the user responds. Adapt follow-ups to distinguish familiarity from real understanding, including personal contribution, trade-offs, failure modes, measurement methods, complexity, and boundaries.
+Every new main question must be traceable to both the current aggregated responsibilities of discovered jobs and the latest resume. Foundational questions, algorithms, system design, and current interview trends are supporting dimensions, not substitutes for that connection. Do not ask a disconnected generic question while the duty profile is available.
+
+Prefix each new question with a concise `职责画像依据` containing the summarized duty, coverage or priority, and representative jobs, then ask exactly one main question. Do not show the answer before the user responds. Adapt follow-ups to distinguish familiarity from real understanding, including personal contribution, trade-offs, failure modes, measurement methods, complexity, and boundaries.
+
+If no duty profile can be built because no verified active job has responsibilities, do not invent one. Retry or schedule job refresh, prioritize overdue weaknesses, and label any necessary resume-only question as a temporary fallback.
 
 Use the configured programming language when present; otherwise infer it from the resume or ask once.
 
@@ -134,7 +148,7 @@ Use the configured programming language when present; otherwise infer it from th
 
 When an answer reveals a real weakness, stop the question sequence.
 
-1. Prepare a complete weakness JSON object using [runtime-schema.md](references/runtime-schema.md).
+1. Prepare a complete weakness JSON object using [runtime-schema.md](references/runtime-schema.md). Set `source` to the profile generation time, duty cluster, representative jobs, and corresponding resume evidence or gap.
 2. Upsert it during the same turn in which the explanation is delivered:
 
 ```text
