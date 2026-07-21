@@ -66,6 +66,12 @@ def build_config(args: argparse.Namespace) -> dict:
             "positive_keywords": positive,
             "fuzzy_keywords": fuzzy,
             "negative_keywords": negative,
+            "intern_exclusion_keywords": [
+                "实习生", "实习", "暑期实习", "日常实习", "寒假实习", "提前批实习", "intern",
+            ],
+            "formal_recruit_keywords": [
+                "校园招聘", "校招", "管培生", "应届生", "全职", "正式员工",
+            ],
         },
         "schedule": {
             "job_refresh_time": args.job_time,
@@ -73,11 +79,18 @@ def build_config(args: argparse.Namespace) -> dict:
             "timezone": args.timezone,
             "thread_span_days": max(1, args.thread_days),
         },
+        "discovery": {
+            "max_companies_per_source": 15,
+            "max_new_company_verifications": 5,
+            "min_successful_sources_for_empty": 3,
+            "history_retention_runs": 30,
+        },
         "files": {
             "resume_patterns": DEFAULT_RESUME_PATTERNS,
             "job_workbook": "岗位总表.xlsx",
             "weakness_workbook": "面试薄弱点复习表.xlsx",
             "job_state": f"{RUNTIME_DIR}/state/jobs.json",
+            "discovery_history": f"{RUNTIME_DIR}/state/discovery-runs.json",
             "pending_weakness_updates": f"{RUNTIME_DIR}/state/pending-weakness-updates.json",
         },
         "job_schema_version": 1,
@@ -110,6 +123,9 @@ def cmd_init(args: argparse.Namespace) -> int:
                 },
             },
         )
+    discovery_path = workspace / config["files"]["discovery_history"]
+    if not discovery_path.exists() or args.force:
+        write_json(discovery_path, {"schema_version": 1, "runs": []})
 
     job_book = jobs.export_workbook(workspace) if args.force else jobs.ensure_workbook(workspace)
     weakness_book = weaknesses.ensure_workbook(workspace)
@@ -119,6 +135,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         "job_workbook": str(job_book),
         "weakness_workbook": str(weakness_book),
         "job_state": str(state_path),
+        "discovery_history": str(discovery_path),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -145,6 +162,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     config = json.loads(path.read_text(encoding="utf-8"))
     resume = latest_resume(workspace, config)
     summary = jobs.state_summary(workspace)
+    history_path = workspace / config["files"].get("discovery_history", f"{RUNTIME_DIR}/state/discovery-runs.json")
+    try:
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        history = {"runs": []}
+    runs = history.get("runs", []) if isinstance(history, dict) else []
     result = {
         "workspace": str(workspace),
         "onboarded": bool(config.get("onboarded")),
@@ -152,6 +175,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "roles": config.get("profile", {}).get("roles", []),
         "schedule": config.get("schedule", {}),
         "jobs": summary,
+        "latest_discovery": runs[-1] if runs else None,
         "job_workbook": str(workspace / config["files"]["job_workbook"]),
         "weakness_workbook": str(workspace / config["files"]["weakness_workbook"]),
     }

@@ -18,6 +18,24 @@ user-workspace/
 
 Never write resumes, job results, weakness records, thread IDs, automation IDs, or personal information into the Skill directory.
 
+## Discovery report schema
+
+Generate a discovery plan with `scripts/discovery.py plan`. After executing its four source groups, create a report containing:
+
+- `run_id`: copied from the plan.
+- `sources`: one result for every planned source group.
+
+Each source result contains:
+
+- `id`: `nowcoder`, `official`, `campus_platforms`, or `roundups_and_internships`.
+- `status`: `success`, `empty`, `blocked`, or `error`.
+- `queries`: actual queries executed.
+- `pages_checked`: URLs actually opened.
+- `error`: required when blocked or failed.
+- `candidates`: discovered candidate objects.
+
+For `success` and `empty`, both `queries` and `pages_checked` must be non-empty. Finalize the report with `scripts/discovery.py finalize`. It writes only responsibility-complete records to the candidate file, keeps incomplete records in the lead file, records source coverage, and permits a zero-job conclusion only after enough source groups completed real searches.
+
 ## Candidate job schema
 
 Each discovered candidate passed to `scripts/jobs.py merge` is a JSON object with:

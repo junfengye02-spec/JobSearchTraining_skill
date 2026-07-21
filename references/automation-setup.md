@@ -29,7 +29,8 @@ Create a project-scoped recurring local job. Its prompt must:
 
 - Invoke `$adaptive-interview-coach` in unattended refresh mode.
 - Read the current workspace config and latest resume.
-- Follow `job-discovery.md` without waiting for user input.
+- Generate and execute the four-source discovery plan from `job-discovery.md` without waiting for user input.
+- Record actual source coverage with `discovery.py finalize`; never interpret blocked discovery as zero jobs.
 - Merge jobs, rebuild the duty profile with today's new-job influence, safely deactivate, and export the one job workbook.
 - Report counts even when nothing changed.
 

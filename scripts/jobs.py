@@ -155,7 +155,7 @@ def verification_rank(value: str) -> int:
     return 0
 
 
-def passes_filters(candidate: dict, config: dict) -> tuple[bool, str]:
+def passes_filters(candidate: dict, config: dict) -> tuple[bool, str, bool]:
     profile = config.get("profile", {})
     filters = config.get("filters", {})
     text = " ".join(
@@ -165,21 +165,27 @@ def passes_filters(candidate: dict, config: dict) -> tuple[bool, str]:
     positive = [item.lower() for item in filters.get("positive_keywords", []) if item]
     fuzzy = [item.lower() for item in filters.get("fuzzy_keywords", []) if item]
     negative = [item.lower() for item in filters.get("negative_keywords", []) if item]
+    intern_exclusions = [
+        item.lower()
+        for item in filters.get("intern_exclusion_keywords", ("实习", "intern"))
+        if item
+    ]
     positive_hit = not positive or any(item in text for item in positive)
     fuzzy_hit = any(item in text for item in fuzzy)
+    fuzzy_only = bool(positive and not positive_hit and fuzzy_hit)
     if positive and not positive_hit and not fuzzy_hit:
-        return False, "未命中目标岗位方向"
+        return False, "未命中目标岗位方向", False
     if not positive_hit and any(item in text for item in negative):
-        return False, "命中排除方向"
+        return False, "命中排除方向", False
     if not profile.get("include_internships", False):
-        if any(word in text for word in ("实习", "intern")):
-            return False, "配置未包含实习岗位"
+        if any(word in text for word in intern_exclusions):
+            return False, "配置未包含实习岗位", False
     target = as_text(profile.get("target_grad_year"))
     target_year_match = re.search(r"(20\d{2})", target)
     years = [int(value) for value in re.findall(r"(20\d{2})届", text)]
     if target_year_match and years and max(years) < int(target_year_match.group(1)):
-        return False, "岗位届别早于目标届别"
-    return True, ""
+        return False, "岗位届别早于目标届别", False
+    return True, "", fuzzy_only
 
 
 def candidate_list(path: Path) -> list[dict]:
@@ -217,13 +223,15 @@ def merge_candidates(workspace: Path, candidates: list[dict]) -> tuple[list[dict
         if missing:
             rejected.append({"candidate": candidate, "reason": "缺少必填字段: " + ", ".join(missing)})
             continue
-        accepted, reason = passes_filters(candidate, config)
+        accepted, reason, fuzzy_only = passes_filters(candidate, config)
         if not accepted:
             rejected.append({"candidate": candidate, "reason": reason})
             continue
 
         company = as_text(candidate["company"])
         title = as_text(candidate["title"])
+        if fuzzy_only and not title.endswith("[方向待确认]"):
+            title += " [方向待确认]"
         source_url = as_text(candidate["source_url"])
         exact_id = make_job_id(company, title, source_url)
         existing_id = exact_id if exact_id in jobs else fuzzy_index.get(fuzzy_key(company, title))
