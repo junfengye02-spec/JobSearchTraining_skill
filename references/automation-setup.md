@@ -7,7 +7,7 @@ Use Codex app task and automation tools when available. If they are unavailable,
 When the user says `开始skill`, perform setup immediately and end to end:
 
 1. Initialize or inspect the current workspace.
-2. Run one job refresh before scheduling future refreshes.
+2. Run job discovery before scheduling future refreshes. On first use, keep `initial_full` mode active until all source and role tasks pass; a small partial result is not completion.
 3. Create or update both exact-name automations.
 4. Create or reuse the current-period interview task, pin it, and ask its first question.
 5. Return concrete created or reused task and automation results.
@@ -29,8 +29,10 @@ Create a project-scoped recurring local job. Its prompt must:
 
 - Invoke `$adaptive-interview-coach` in unattended refresh mode.
 - Read the current workspace config and latest resume.
-- Generate and execute the four-source discovery plan from `job-discovery.md` without waiting for user input.
-- Record actual source coverage with `discovery.py finalize`; never interpret blocked discovery as zero jobs.
+- Generate and execute the four-source discovery plan from `job-discovery.md` without waiting for user input. `auto` must continue first-use full search until a completed `initial_full` run is recorded.
+- Execute every configured role task, planned query, and pagination rule; never stop after the first result.
+- Record role-level coverage with `discovery.py finalize`; never interpret shallow, blocked, or incomplete discovery as zero jobs or a completed refresh.
+- Put only detail-verified, currently open, unexpired postings into the workbook; preserve unknown or closed items as leads.
 - Merge jobs, rebuild the duty profile with today's new-job influence, safely deactivate, and export the one job workbook.
 - Report counts even when nothing changed.
 

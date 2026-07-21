@@ -42,6 +42,21 @@ def config_path(workspace: Path) -> Path:
     return workspace / RUNTIME_DIR / "config.json"
 
 
+def parse_role_aliases(values: list[str], roles: list[str]) -> dict[str, list[str]]:
+    result = {role: [] for role in roles}
+    role_lookup = {role.strip().lower(): role for role in roles}
+    for value in values:
+        if "=" not in value:
+            raise SystemExit(f"Role alias must use ROLE=ALIAS format: {value}")
+        supplied_role, alias = (part.strip() for part in value.split("=", 1))
+        role = role_lookup.get(supplied_role.lower())
+        if not role or not alias:
+            raise SystemExit(f"Role alias references an unknown or empty role: {value}")
+        if alias != role and alias not in result[role]:
+            result[role].append(alias)
+    return result
+
+
 def build_config(args: argparse.Namespace) -> dict:
     roles = list(dict.fromkeys(args.role or []))
     locations = list(dict.fromkeys(args.location or []))
@@ -49,6 +64,7 @@ def build_config(args: argparse.Namespace) -> dict:
     positive = list(dict.fromkeys(args.positive_keyword or []))
     fuzzy = list(dict.fromkeys(args.fuzzy_keyword or []))
     negative = list(dict.fromkeys(args.negative_keyword or []))
+    aliases = parse_role_aliases(args.role_alias or [], roles)
 
     return {
         "schema_version": 1,
@@ -58,6 +74,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "target_grad_year": args.grad_year,
             "target_season_label": args.season,
             "roles": roles,
+            "role_aliases": aliases,
             "include_internships": args.include_internships,
             "location_preferences": locations,
             "company_type_preferences": company_types,
@@ -80,9 +97,14 @@ def build_config(args: argparse.Namespace) -> dict:
             "thread_span_days": max(1, args.thread_days),
         },
         "discovery": {
-            "max_companies_per_source": 15,
-            "max_new_company_verifications": 5,
-            "min_successful_sources_for_empty": 3,
+            "initial_max_candidates_per_source": 50,
+            "daily_max_candidates_per_source": 20,
+            "initial_max_result_pages_per_query": 5,
+            "daily_max_result_pages_per_query": 2,
+            "stop_after_consecutive_no_new_pages": 2,
+            "initial_max_new_company_verifications": 30,
+            "daily_max_new_company_verifications": 5,
+            "initial_low_yield_threshold": 5,
             "history_retention_runs": 30,
         },
         "files": {
@@ -173,6 +195,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "onboarded": bool(config.get("onboarded")),
         "latest_resume": str(resume) if resume else None,
         "roles": config.get("profile", {}).get("roles", []),
+        "role_aliases": config.get("profile", {}).get("role_aliases", {}),
         "schedule": config.get("schedule", {}),
         "jobs": summary,
         "latest_discovery": runs[-1] if runs else None,
@@ -180,6 +203,29 @@ def cmd_status(args: argparse.Namespace) -> int:
         "weakness_workbook": str(workspace / config["files"]["weakness_workbook"]),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_set_role_aliases(args: argparse.Namespace) -> int:
+    workspace = Path(args.workspace).expanduser().resolve()
+    path = config_path(workspace)
+    if not path.exists():
+        raise SystemExit(f"Workspace is not initialized: {path}")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    profile = config.setdefault("profile", {})
+    roles = profile.get("roles", [])
+    updates = parse_role_aliases(args.role_alias or [], roles)
+    aliases = {} if args.replace else profile.get("role_aliases", {})
+    if not isinstance(aliases, dict):
+        aliases = {}
+    for role in roles:
+        existing = [] if args.replace else aliases.get(role, [])
+        if not isinstance(existing, list):
+            existing = [str(existing)] if str(existing).strip() else []
+        aliases[role] = list(dict.fromkeys([*existing, *updates.get(role, [])]))
+    profile["role_aliases"] = aliases
+    write_json(path, config)
+    print(json.dumps({"roles": roles, "role_aliases": aliases}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -192,6 +238,7 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--grad-year", default="")
     init.add_argument("--season", default="")
     init.add_argument("--role", action="append", default=[])
+    init.add_argument("--role-alias", action="append", default=[], help="ROLE=ALIAS; repeat as needed")
     init.add_argument("--location", action="append", default=[])
     init.add_argument("--company-type", action="append", default=[])
     init.add_argument("--positive-keyword", action="append", default=[])
@@ -208,6 +255,12 @@ def parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Show initialized inputs and generated artifacts")
     status.add_argument("--workspace", required=True)
     status.set_defaults(func=cmd_status)
+
+    aliases = sub.add_parser("set-role-aliases", help="Add or replace job-title aliases for configured roles")
+    aliases.add_argument("--workspace", required=True)
+    aliases.add_argument("--role-alias", action="append", required=True, help="ROLE=ALIAS; repeat as needed")
+    aliases.add_argument("--replace", action="store_true")
+    aliases.set_defaults(func=cmd_set_role_aliases)
     return ap
 
 

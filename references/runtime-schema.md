@@ -23,18 +23,28 @@ Never write resumes, job results, weakness records, thread IDs, automation IDs, 
 Generate a discovery plan with `scripts/discovery.py plan`. After executing its four source groups, create a report containing:
 
 - `run_id`: copied from the plan.
+- `mode`: copied from the plan: `initial_full` or `daily_refresh`.
 - `sources`: one result for every planned source group.
 
 Each source result contains:
 
 - `id`: `nowcoder`, `official`, `campus_platforms`, or `roundups_and_internships`.
 - `status`: `success`, `empty`, `blocked`, or `error`.
-- `queries`: actual queries executed.
-- `pages_checked`: URLs actually opened.
+- `role_coverage`: one result for every canonical role in that source's plan.
 - `error`: required when blocked or failed.
 - `candidates`: discovered candidate objects.
 
-For `success` and `empty`, both `queries` and `pages_checked` must be non-empty. Finalize the report with `scripts/discovery.py finalize`. It writes only responsibility-complete records to the candidate file, keeps incomplete records in the lead file, records source coverage, and permits a zero-job conclusion only after enough source groups completed real searches.
+Each `role_coverage` item contains:
+
+- `role`: the exact canonical role from the plan.
+- `status`: `success`, `empty`, `blocked`, or `error`.
+- `queries`: every planned query actually executed for the role.
+- `pages_checked`: search, result, and detail URLs actually opened.
+- `exhausted`: true only after the source end, consecutive-no-new-page rule, or configured page limit.
+- `stop_reason`: `end`, `consecutive_no_new`, `page_limit`, `candidate_limit`, `blocked`, or `error`. `candidate_limit` is incomplete and must never be reported as exhausted coverage.
+- `error`: required for blocked or failed role searches.
+
+Finalize with `scripts/discovery.py finalize`. Missing roles, planned queries, pages, exhaustion, or stop reasons make the run incomplete even when candidates were found. The script writes only complete and currently open records to the candidate file, keeps the rest in the lead file with reasons, and permits a zero-open-job conclusion only after all four sources and all roles complete.
 
 ## Candidate job schema
 
@@ -49,16 +59,20 @@ Each discovered candidate passed to `scripts/jobs.py merge` is a JSON object wit
 - `job_type`: campus hire, internship, convertible internship, or another explicit type.
 - `enterprise_tag`: optional organization category.
 - `direction_tags`: string or list of role directions.
+- `matched_roles`: required canonical role names from the configured target roles.
 - `highlight`: concise factual highlight.
 - `verification`: `官方招聘页`, `招聘平台职位页`, `公开公告`, or `待核实`.
 - `deadline`: ISO date when explicit; otherwise empty.
+- `application_status`: required `open` for workbook-ready records.
+- `availability_evidence`: required current page evidence, such as an active apply button or official open listing.
+- `checked_at`: required timestamp from the current discovery run.
 - `grad_year`: target graduation cohort when explicit.
 - `season`: recruitment season label.
 - `match_level`: `高度匹配`, `较高匹配`, `相近方向`, `待评估`, or `待确认`.
 - `match_reason`: resume-to-duty evidence.
 - `skill_gaps`: concrete missing or weak capabilities inferred from the resume.
 
-The merge script rejects records missing company, title, responsibilities, or source URL.
+The merge script rejects records missing company, title, responsibilities, source URL, open application status, availability evidence, or check time. It also rejects expired deadlines.
 
 ## Deactivation schema
 

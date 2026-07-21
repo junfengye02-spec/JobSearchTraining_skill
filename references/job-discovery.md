@@ -11,11 +11,13 @@ If no web capability exists, record every source as `blocked`, run `scripts/disc
 Run:
 
 ```text
-python "$SKILL_DIR/scripts/discovery.py" plan --workspace "$WORKSPACE" --output "<plan.json>"
+python "$SKILL_DIR/scripts/discovery.py" plan --workspace "$WORKSPACE" --mode auto --output "<plan.json>"
 ```
 
 The plan substitutes the configured cohort, season, roles, internship choice, locations, and company preferences into four independent source groups.
-It generates separate queries for every configured role instead of joining unrelated roles into one exact phrase. When `entry_urls` are present, open those public site-search pages first; this avoids depending on a general search engine for every source.
+It generates separate `role_tasks` for every configured role and includes that role's common job-title aliases. Never collapse multiple user-requested roles into one coverage item.
+
+`auto` uses `initial_full` until history contains a successful first-use full search. That mode searches up to 50 relevant candidates per source, checks up to five result pages per query, and allows broader official verification. Only after all four sources and every role task pass coverage validation does `auto` switch to the smaller daily refresh plan.
 
 ## Four source groups
 
@@ -32,14 +34,17 @@ When agent delegation is available, run the four source groups in parallel. Othe
 
 For each source group:
 
-- Use its generated queries and available web/browser tools.
-- Open public `entry_urls` first when provided, then use the generated queries for broader recall.
-- Limit deep verification to the configured maximum, normally 10–15 relevant companies.
-- Record the actual queries and URLs opened.
+- Execute every query in every `role_task`; do not stop after the first matching job.
+- Open all public `entry_urls` in that role task, then use the generated queries for broader recall.
+- Follow result pagination until the source ends, two consecutive pages add no relevant jobs, or the configured per-query page limit is reached.
+- Preserve up to the mode's candidate limit per source. The limit is a safety boundary, not a completion signal; if it is reached, use `candidate_limit`, keep `exhausted=false`, and report coverage incomplete instead of truncating and claiming completion.
+- Record role-level queries, URLs opened, whether pagination was exhausted, and the stop reason.
 - Return `success`, `empty`, `blocked`, or `error`; distinguish empty results from inability to search.
-- Return structured candidates with company, title, responsibilities, city, job type, enterprise tag, direction tags, highlight, verification, source platform, source URL, deadline, cohort, and season.
+- Return structured candidates with company, title, responsibilities, city, job type, enterprise tag, direction tags, matched canonical roles, highlight, verification, source platform, source URL, deadline, cohort, season, application status, current-availability evidence, and check time.
 - Keep incomplete discoveries as leads. Do not invent responsibilities.
 - Do not repeatedly retry the same inaccessible method.
+
+For each canonical role, return one `role_coverage` entry. Mark `exhausted=true` only after reaching the actual end, the consecutive-no-new-page rule, or the configured page limit. Include every planned query in that entry's `queries`; missing even one planned query makes coverage incomplete.
 
 Combine results into one report matching the schema emitted by `discovery.py plan`, then run:
 
@@ -49,13 +54,23 @@ python "$SKILL_DIR/scripts/discovery.py" finalize --workspace "$WORKSPACE" \
   --leads-output "<leads.json>" --status-output "<discovery-status.json>"
 ```
 
-Exit code `2` means discovery is blocked or inconclusive. Do not report “没有岗位” in that case. A source marked `success` or `empty` must contain both an actual query and at least one visited page; otherwise finalization changes it to `error`. A zero-job conclusion is allowed only when at least the configured minimum number of source groups, normally three, completed with auditable `success` or `empty` evidence.
+Exit code `2` means discovery is blocked, shallow, or incomplete. `jobs_found_incomplete` means usable jobs were found, but missing roles, planned queries, pages, or sources still require work. Preserve those jobs, continue the missing work, and finalize again. Do not report “搜索完成” or “没有岗位” in that state.
+
+A zero-open-job conclusion is allowed only when all four source groups completed every role task with query, visited-page, exhaustion, and stop-reason evidence. One source worker returning `success` is not enough.
 
 ## Enrich and verify
 
-Open incomplete leads and obtain responsibilities from a job-detail or official page. Update the source report and finalize again. Records without responsibilities remain outside the main workbook.
+Open incomplete leads and obtain responsibilities from a job-detail or official page. A workbook-ready job must meet all of these conditions:
 
-For companies not previously seen, verify up to five against official career sites. Replace aggregator links with official detail links when available. If an official page proves the cohort is wrong or the job is closed, reject or deactivate it. A failed verification attempt is not proof of closure.
+- Complete, faithfully captured responsibilities.
+- `application_status` is `open`.
+- `availability_evidence` quotes a visible current signal, such as an active apply button, an official job currently listed, or an unexpired application window.
+- `checked_at` records this run's check time.
+- An explicit deadline has not passed.
+
+Search snippets, roundup mentions, inaccessible pages, unknown status, and closed or expired jobs stay in the lead file. Update the source report and finalize again after enrichment.
+
+For companies not previously seen, use the plan's verification allowance: larger during `initial_full`, smaller during `daily_refresh`. Replace aggregator links with official detail links when available. If an official page proves the cohort is wrong or the job is closed, reject or deactivate it. A failed verification attempt is not proof of closure.
 
 ## Filter, merge, profile, and export
 
@@ -68,4 +83,4 @@ Read [keyword-filters.md](keyword-filters.md), then:
 5. Run `scripts/jobs.py export` to rebuild the one workbook, including `岗位总表`, `职责画像`, `已失效岗位`, and `概览`.
 6. Run `scripts/discovery.py report` and report discovery coverage plus new, rejected, deactivated, active, and duty-profile counts.
 
-Maintain one `岗位总表.xlsx`; keep `岗位名称` and `岗位职责` as the first two columns, preserve clickable source links, and never create a fallback copy when Excel is locked.
+Maintain one `岗位总表.xlsx`; keep `岗位名称` and `岗位职责` as the first two columns, preserve clickable source links, show current application status/evidence/check time, and never create a fallback copy when Excel is locked.

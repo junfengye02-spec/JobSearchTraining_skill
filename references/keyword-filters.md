@@ -26,3 +26,7 @@ Do not hard-filter geography unless the user explicitly configured a strict limi
 ## Missing duties
 
 Keep a posting without responsibilities only in the lead file. It cannot enter the main job workbook until a job-detail or official page provides duties.
+
+## Current application availability
+
+Keep a posting in the main workbook only when its detail or official page currently shows that applications are open. Require an open status, visible evidence, and this run's check time. An expired deadline, closed listing, search snippet, roundup-only mention, inaccessible detail, or unknown availability remains a lead.

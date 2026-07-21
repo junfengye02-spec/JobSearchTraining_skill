@@ -25,7 +25,11 @@ RUNTIME_DIR = ".adaptive-interview-coach"
 VOLATILE_QUERY_PREFIXES = (
     "utm_", "spm", "session", "token", "sid", "trace", "timestamp", "_t", "from",
 )
-REQUIRED_FIELDS = ("company", "title", "responsibilities", "source_url")
+REQUIRED_FIELDS = (
+    "company", "title", "responsibilities", "source_url", "matched_roles",
+    "application_status", "availability_evidence", "checked_at",
+)
+OPEN_APPLICATION_STATUSES = {"open", "currently_open", "可投递", "招聘中", "开放投递"}
 ALLOWED_DEACTIVATION_REASONS = {
     "deadline_passed": "截止日期已过",
     "removed": "职位已下线",
@@ -39,7 +43,7 @@ HEADERS = [
     "岗位名称", "岗位职责", "公司", "企业标签", "方向标签", "地点", "岗位性质",
     "地点优先级", "匹配度", "匹配依据", "能力缺口", "岗位亮点", "核实状态",
     "来源平台", "岗位链接", "首次发现", "最近确认", "截止日期", "届别",
-    "招聘季节", "状态", "失效原因",
+    "招聘季节", "投递状态", "当前可投依据", "投递核验时间", "状态", "失效原因",
 ]
 PROFILE_HEADERS = [
     "职责类别", "归纳职责", "出现岗位数", "覆盖比例", "优先级", "趋势", "关键词",
@@ -185,6 +189,15 @@ def passes_filters(candidate: dict, config: dict) -> tuple[bool, str, bool]:
     years = [int(value) for value in re.findall(r"(20\d{2})届", text)]
     if target_year_match and years and max(years) < int(target_year_match.group(1)):
         return False, "岗位届别早于目标届别", False
+    if normalize_text(candidate.get("application_status")) not in OPEN_APPLICATION_STATUSES:
+        return False, "岗位未核实为当前可投", False
+    deadline = as_text(candidate.get("deadline"))[:10]
+    if deadline:
+        try:
+            if date.fromisoformat(deadline) < date.today():
+                return False, "岗位投递截止日期已过", False
+        except ValueError:
+            return False, "岗位截止日期格式无效", False
     return True, "", fuzzy_only
 
 
@@ -241,7 +254,8 @@ def merge_candidates(workspace: Path, candidates: list[dict]) -> tuple[list[dict
             for field in (
                 "responsibilities", "city", "job_type", "enterprise_tag", "direction_tags",
                 "match_level", "match_reason", "skill_gaps", "highlight", "source_platform",
-                "deadline", "grad_year", "season",
+                "deadline", "grad_year", "season", "matched_roles", "application_status",
+                "availability_evidence", "checked_at",
             ):
                 prefer_new_value(record, candidate, field)
             new_verification = as_text(candidate.get("verification"))
@@ -277,6 +291,10 @@ def merge_candidates(workspace: Path, candidates: list[dict]) -> tuple[list[dict
             "deadline": as_text(candidate.get("deadline")),
             "grad_year": as_text(candidate.get("grad_year")) or as_text(config.get("profile", {}).get("target_grad_year")),
             "season": as_text(candidate.get("season")) or as_text(config.get("profile", {}).get("target_season_label")),
+            "matched_roles": candidate.get("matched_roles", []),
+            "application_status": as_text(candidate.get("application_status")),
+            "availability_evidence": as_text(candidate.get("availability_evidence")),
+            "checked_at": as_text(candidate.get("checked_at")),
             "first_seen": as_text(candidate.get("discovered_at")) or today,
             "last_confirmed": today,
             "active": True,
@@ -347,6 +365,9 @@ def cmd_deactivate(args: argparse.Namespace) -> int:
         record["deactivated_at"] = today_iso()
         record["deactivation_reason"] = ALLOWED_DEACTIVATION_REASONS[reason]
         record["deactivation_evidence"] = evidence
+        record["application_status"] = "closed"
+        record["availability_evidence"] = evidence
+        record["checked_at"] = now_iso()
         changed.append(job_id)
     save_state(workspace, state, config)
     print(json.dumps({"deactivated": changed, "rejected": rejected}, ensure_ascii=False, indent=2))
@@ -477,6 +498,15 @@ def match_rank(value: str) -> int:
     return ranks.get(value, 5)
 
 
+def application_status_label(value: object) -> str:
+    normalized = normalize_text(value)
+    if normalized in OPEN_APPLICATION_STATUSES:
+        return "开放投递"
+    if normalized in {"closed", "已关闭", "停止招聘", "招聘结束"}:
+        return "已关闭"
+    return as_text(value) or "待核实"
+
+
 def sorted_records(records: list[dict], config: dict) -> list[dict]:
     return sorted(
         records,
@@ -515,6 +545,9 @@ def add_job_sheet(workbook: Workbook, name: str, records: list[dict], config: di
             as_text(record.get("deadline")),
             as_text(record.get("grad_year")),
             as_text(record.get("season")),
+            application_status_label(record.get("application_status")),
+            as_text(record.get("availability_evidence")),
+            as_text(record.get("checked_at")),
             "有效" if record.get("active", True) else "已失效",
             as_text(record.get("deactivation_reason")),
         ])
@@ -546,7 +579,10 @@ def add_job_sheet(workbook: Workbook, name: str, records: list[dict], config: di
         row[0].font = Font(bold=True, color=NAVY)
         sheet.row_dimensions[row[0].row].height = 88
 
-    widths = [38, 70, 22, 22, 28, 18, 18, 18, 14, 40, 38, 40, 18, 24, 48, 14, 14, 14, 12, 20, 12, 28]
+    widths = [
+        38, 70, 22, 22, 28, 18, 18, 18, 14, 40, 38, 40, 18, 24, 48, 14, 14,
+        14, 12, 20, 14, 44, 24, 12, 28,
+    ]
     for index, width in enumerate(widths, 1):
         sheet.column_dimensions[get_column_letter(index)].width = width
     sheet.freeze_panes = "C2"
@@ -555,7 +591,8 @@ def add_job_sheet(workbook: Workbook, name: str, records: list[dict], config: di
     sheet.page_setup.orientation = "landscape"
     sheet.page_setup.fitToWidth = 1
     if records:
-        table = Table(displayName=table_name, ref=f"A1:V{len(records) + 1}")
+        last_column = get_column_letter(len(HEADERS))
+        table = Table(displayName=table_name, ref=f"A1:{last_column}{len(records) + 1}")
         table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=False)
         sheet.add_table(table)
 

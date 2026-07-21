@@ -37,8 +37,9 @@ Treat `开始skill` as authorization to complete all reversible, workspace-local
    - include internships when the resume clearly represents a current student or target graduate;
    - reuse explicit location and organization preferences from existing files; otherwise search nationwide without inventing a preferred city;
    - infer the current recruitment season conservatively, leaving uncertain labels empty rather than fabricating them.
-5. Derive positive, fuzzy, and negative keywords, then run **Initialize the workspace** without asking the user to repeat information already present in the files.
-6. Immediately run one **Refresh jobs** cycle. If a web source is unavailable, continue with other sources and do not block the remaining setup.
+   Treat every role direction explicitly named by the user as binding. The resume may add evidence and adjacent search aliases, but it must not remove, merge away, or silently narrow a requested role.
+5. Derive positive, fuzzy, and negative keywords plus 3–8 common job-title aliases for every role. Then run **Initialize the workspace** without asking the user to repeat information already present in the files. If an existing config lacks aliases, repair it with `workspace.py set-role-aliases`.
+6. Immediately run **Refresh jobs** in automatic mode. Until a completed `initial_full` run exists, the plan stays in first-use full-search mode. Do not report bootstrap job discovery as complete merely because one or a few jobs were found. If a web source is unavailable, continue with other sources, preserve partial open jobs, and explicitly report incomplete coverage.
 7. Run **Create the recurring workflow**: create or update the job refresh automation, create and pin the current interview task, attach the daily interview automation, and ask the first question in that task.
 8. Finish with the generated file paths, automation times, interview task identity, and job refresh counts.
 
@@ -59,7 +60,8 @@ Read [runtime-schema.md](references/runtime-schema.md) and [automation-setup.md]
    - preferred locations and organization types.
 3. Default the timezone from the user's environment, job refresh to 08:00, interview to 09:00, and task span to 7 days unless the user specifies otherwise.
 4. Derive concise positive, fuzzy, and negative job keywords from the role directions. Do not make the user enumerate technical synonyms.
-5. Run `scripts/workspace.py init` with the collected values. Quote every path and repeat multi-value flags as needed.
+5. Derive 3–8 title aliases for each requested role, such as broader titles, common Chinese/English variants, and closely equivalent campus-recruiting titles. Do not replace the canonical user wording with an alias.
+6. Run `scripts/workspace.py init` with the collected values. Quote every path and repeat multi-value flags as needed.
 
 Example shape:
 
@@ -67,6 +69,7 @@ Example shape:
 python "$SKILL_DIR/scripts/workspace.py" init --workspace "$WORKSPACE" \
   --grad-year "<cohort>" --season "<season>" \
   --role "<role>" --location "<location>" \
+  --role-alias "<role>=<equivalent title>" \
   --positive-keyword "<keyword>" --fuzzy-keyword "<keyword>" \
   --negative-keyword "<keyword>" --include-internships
 ```
@@ -87,14 +90,15 @@ Read [job-discovery.md](references/job-discovery.md), [keyword-filters.md](refer
 python "$SKILL_DIR/scripts/workspace.py" status --workspace "$WORKSPACE"
 ```
 
-2. Generate the configured four-source discovery plan:
+2. Generate the configured four-source discovery plan. `auto` remains `initial_full` until one full run passes every source and role-coverage check, then changes to `daily_refresh`:
 
 ```text
-python "$SKILL_DIR/scripts/discovery.py" plan --workspace "$WORKSPACE" --output "<plan.json>"
+python "$SKILL_DIR/scripts/discovery.py" plan --workspace "$WORKSPACE" --mode auto --output "<plan.json>"
 ```
 
-3. Execute all four source groups from the plan with real web/search/browser tools: 牛客; enterprise recruitment announcements plus official sites; 51job/智联/猎聘 campus channels; public roundups plus 实习僧. Run them in parallel when delegation is available or sequentially otherwise. Do not nest delegated agents.
-4. Save actual queries, opened pages, source status, errors, and candidates in the source report, then validate coverage:
+3. Execute all four source groups from the plan with real web/search/browser tools: 牛客; enterprise recruitment announcements plus official sites; 51job/智联/猎聘 campus channels; public roundups plus 实习僧. For every `role_task`, execute every planned query and public entry URL. Follow pagination until the source ends, the configured consecutive-no-new-page rule fires, or the per-query safety limit is reached. Finding the first result is never a stop condition. Run source groups in parallel when delegation is available or sequentially otherwise. Do not nest delegated agents.
+4. Open job details before accepting a candidate. Capture complete duties plus `application_status=open`, visible `availability_evidence` such as an active apply button or current official listing, and `checked_at`. A roundup, stale search snippet, inaccessible page, expired deadline, closed listing, or unknown availability stays a lead and cannot enter the workbook.
+5. Save actual per-role queries, opened pages, pagination exhaustion, stop reasons, source status, errors, and candidates in the source report, then validate coverage:
 
 ```text
 python "$SKILL_DIR/scripts/discovery.py" finalize --workspace "$WORKSPACE" \
@@ -102,9 +106,9 @@ python "$SKILL_DIR/scripts/discovery.py" finalize --workspace "$WORKSPACE" \
   --leads-output "<leads.json>" --status-output "<discovery-status.json>"
 ```
 
-5. If finalize exits with code `2`, report discovery as blocked or inconclusive. Do not claim there are no jobs and do not replace the canonical workbook with an empty result. Enrich incomplete leads from job-detail or official pages and finalize again when possible.
-6. Compare every ready candidate's duties with the latest resume. Fill `match_level`, `match_reason`, and `skill_gaps` with concrete evidence.
-7. Merge validated candidates:
+6. If finalize exits with code `2`, inspect `conclusion`. For `jobs_found_incomplete`, preserve the verified open candidates but continue missing role tasks, planned queries, pagination, and blocked-source fallbacks before reporting completion. For other incomplete states, report the exact blockage. Never replace the canonical workbook with an empty result or say “四源覆盖已完成” while `coverage_complete` is false.
+7. Compare every ready candidate's duties with the latest resume. Fill `match_level`, `match_reason`, and `skill_gaps` with concrete evidence.
+8. Merge validated candidates:
 
 ```text
 python "$SKILL_DIR/scripts/jobs.py" merge --workspace "$WORKSPACE" \
@@ -112,7 +116,7 @@ python "$SKILL_DIR/scripts/jobs.py" merge --workspace "$WORKSPACE" \
   --rejected-output "<rejected.json>"
 ```
 
-8. After every merge, rebuild a dynamic duty profile from all active job responsibilities. Cluster similar duties, count job coverage, map each cluster to resume evidence and gaps, and explain how today's new jobs changed its emphasis. Save it before export:
+9. After every merge, rebuild a dynamic duty profile from all active job responsibilities. Cluster similar duties, count job coverage, map each cluster to resume evidence and gaps, and explain how today's new jobs changed its emphasis. Save it before export:
 
 ```text
 python "$SKILL_DIR/scripts/jobs.py" profile --workspace "$WORKSPACE" --input "<duty-profile.json>"
@@ -120,13 +124,13 @@ python "$SKILL_DIR/scripts/jobs.py" profile --workspace "$WORKSPACE" --input "<d
 
 Include the current run's new job IDs and a `clusters` array following [runtime-schema.md](references/runtime-schema.md). Recompute from the complete active set every day; do not merely append new duties to yesterday's summary.
 
-9. Recheck active jobs. For up to five newly seen companies, prefer official career-site verification and replace aggregator links when possible. Deactivate only when an official deadline has passed, the job is explicitly closed/removed, the page returns 404/410, or an authoritative source proves it no longer exists. Temporary network errors, authentication, CAPTCHAs, throttling, and ambiguity are not evidence. Use:
+10. Recheck active jobs. Use the plan's higher first-run verification allowance and lower daily allowance. Prefer official career-site verification and replace aggregator links when possible. Deactivate only when an official deadline has passed, the job is explicitly closed/removed, the page returns 404/410, or an authoritative source proves it no longer exists. Temporary network errors, authentication, CAPTCHAs, throttling, and ambiguity are not evidence. Use:
 
 ```text
 python "$SKILL_DIR/scripts/jobs.py" deactivate --workspace "$WORKSPACE" --input "<deactivations.json>"
 ```
 
-10. Rebuild the configured workbook in place:
+11. Rebuild the configured workbook in place:
 
 ```text
 python "$SKILL_DIR/scripts/jobs.py" export --workspace "$WORKSPACE"
@@ -134,13 +138,13 @@ python "$SKILL_DIR/scripts/jobs.py" export --workspace "$WORKSPACE"
 
 Do not create dated workbook copies. If Excel locks the workbook, leave state intact, report that export is pending, and retry on the next run.
 
-11. Render or inspect the coverage-aware report:
+12. Render or inspect the coverage-aware report:
 
 ```text
 python "$SKILL_DIR/scripts/discovery.py" report --workspace "$WORKSPACE"
 ```
 
-Always report all four source statuses plus new, deactivated, rejected, active, and duty-profile totals. A normal zero-change report is valid only when discovery marked `can_report_no_jobs` true.
+Always report the discovery mode, `coverage_complete`, all four source statuses, counts for every requested role, verified-open, lead, new, deactivated, rejected, active, and duty-profile totals. A normal zero-change report is valid only when discovery marked `can_report_no_jobs` true.
 
 ## Run the interview loop
 
