@@ -12,6 +12,9 @@ user-workspace/
 └── .adaptive-interview-coach/
     ├── config.json
     ├── state/jobs.json
+    ├── state/discovery-runs.json
+    ├── state/pending-job-leads.json
+    ├── state/company-audit.json
     ├── state/pending-weakness-updates.json
     └── tmp/
 ```
@@ -31,6 +34,9 @@ Each source result contains:
 - `id`: `nowcoder`, `official`, `campus_platforms`, or `roundups_and_internships`.
 - `status`: `success`, `empty`, `blocked`, or `error`.
 - `role_coverage`: one result for every canonical role in that source's plan.
+- `entry_runs`: one result for every exact public entry URL in that source's plan.
+- `enumeration_complete` and `enumerated_companies`: required for 牛客 company enumeration.
+- `company_audits`: official-search evidence for every enumerated, watched, retry, or candidate company.
 - `error`: required when blocked or failed.
 - `candidates`: discovered candidate objects.
 
@@ -38,13 +44,16 @@ Each `role_coverage` item contains:
 
 - `role`: the exact canonical role from the plan.
 - `status`: `success`, `empty`, `blocked`, or `error`.
-- `queries`: every planned query actually executed for the role.
-- `pages_checked`: search, result, and detail URLs actually opened.
-- `exhausted`: true only after the source end, consecutive-no-new-page rule, or configured page limit.
-- `stop_reason`: `end`, `consecutive_no_new`, `page_limit`, `candidate_limit`, `blocked`, or `error`. `candidate_limit` is incomplete and must never be reported as exhausted coverage.
+- `query_runs`: one object for every exact planned query. Each object contains `query`, `status`, `pages_checked`, `exhausted`, `stop_reason`, and an `error` when blocked or failed.
+- A query run's `exhausted` is true only after the source end, consecutive-no-new-page rule, or configured page limit.
+- A query run's `stop_reason` is `end`, `consecutive_no_new`, `page_limit`, `candidate_limit`, `blocked`, or `error`. `candidate_limit` is incomplete and must never be reported as exhausted coverage.
 - `error`: required for blocked or failed role searches.
 
-Finalize with `scripts/discovery.py finalize`. Missing roles, planned queries, pages, exhaustion, or stop reasons make the run incomplete even when candidates were found. The script writes only complete and currently open records to the candidate file, keeps the rest in the lead file with reasons, and permits a zero-open-job conclusion only after all four sources and all roles complete.
+Each `entry_runs` item contains `url`, `status`, `checked_at`, `evidence`, and `error` when needed. Each `company_audits` item contains `company`, `status`, `official_search_attempted`, exact `queries`, `pages_checked`, `checked_at`, and `error` when needed. Only `verified` and `no_match` are complete audit statuses.
+
+Finalize with `scripts/discovery.py finalize`. Missing roles, independent query evidence, entries, pages, exhaustion, company enumeration, company audits, or stop reasons make the run incomplete even when candidates were found. The script writes only complete and currently open records to the candidate file, persists the rest in the lead and company-audit state files, and permits a zero-open-job conclusion only after all four sources and all persistent retries complete. Aggregate legacy fields do not satisfy schema version 2.
+
+To resolve a pending non-ready lead, add a `lead_resolutions` array to the report. Each item requires the exact `lead_key` from the retry queue, `resolution` equal to `closed`, `duplicate`, or `irrelevant`, current `evidence`, and a timezone-aware ISO-8601 `checked_at`. A bare key cannot delete a lead. The resolution is retained as a tombstone so the same stale lead cannot reappear; a future candidate with complete duties and current-open evidence can still become ready and re-enter through the normal merge path. Ready candidates resolve their matching pending lead automatically.
 
 ## Candidate job schema
 

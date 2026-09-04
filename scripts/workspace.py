@@ -15,6 +15,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import jobs  # noqa: E402
 import weaknesses  # noqa: E402
+from configuration import upgrade_config  # noqa: E402
 
 
 RUNTIME_DIR = ".adaptive-interview-coach"
@@ -36,6 +37,13 @@ def write_json(path: Path, value: object) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temp.replace(path)
+
+
+def read_json(path: Path, default: object) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
 
 
 def config_path(workspace: Path) -> Path:
@@ -64,10 +72,11 @@ def build_config(args: argparse.Namespace) -> dict:
     positive = list(dict.fromkeys(args.positive_keyword or []))
     fuzzy = list(dict.fromkeys(args.fuzzy_keyword or []))
     negative = list(dict.fromkeys(args.negative_keyword or []))
+    watch_companies = list(dict.fromkeys(args.watch_company or []))
     aliases = parse_role_aliases(args.role_alias or [], roles)
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "onboarded": True,
         "created_at": datetime.now().astimezone().isoformat(),
         "profile": {
@@ -78,6 +87,8 @@ def build_config(args: argparse.Namespace) -> dict:
             "include_internships": args.include_internships,
             "location_preferences": locations,
             "company_type_preferences": company_types,
+            "watch_companies": watch_companies,
+            "include_high_growth_companies": bool(args.include_high_growth_companies),
         },
         "filters": {
             "positive_keywords": positive,
@@ -97,14 +108,19 @@ def build_config(args: argparse.Namespace) -> dict:
             "thread_span_days": max(1, args.thread_days),
         },
         "discovery": {
-            "initial_max_candidates_per_source": 50,
-            "daily_max_candidates_per_source": 20,
-            "initial_max_result_pages_per_query": 5,
-            "daily_max_result_pages_per_query": 2,
+            "max_role_aliases": 8,
+            "initial_max_candidates_per_source": 120,
+            "daily_max_candidates_per_source": 40,
+            "initial_max_result_pages_per_query": 8,
+            "daily_max_result_pages_per_query": 3,
             "stop_after_consecutive_no_new_pages": 2,
-            "initial_max_new_company_verifications": 30,
-            "daily_max_new_company_verifications": 5,
-            "initial_low_yield_threshold": 5,
+            "initial_max_new_company_verifications": 120,
+            "daily_max_new_company_verifications": 20,
+            "initial_low_yield_threshold": 20,
+            "audit_all_nowcoder_companies": True,
+            "require_official_company_search": True,
+            "retry_pending_leads": True,
+            "retry_pending_company_audits": True,
             "history_retention_runs": 30,
         },
         "files": {
@@ -113,6 +129,8 @@ def build_config(args: argparse.Namespace) -> dict:
             "weakness_workbook": "面试薄弱点复习表.xlsx",
             "job_state": f"{RUNTIME_DIR}/state/jobs.json",
             "discovery_history": f"{RUNTIME_DIR}/state/discovery-runs.json",
+            "pending_job_leads": f"{RUNTIME_DIR}/state/pending-job-leads.json",
+            "company_audit": f"{RUNTIME_DIR}/state/company-audit.json",
             "pending_weakness_updates": f"{RUNTIME_DIR}/state/pending-weakness-updates.json",
         },
         "job_schema_version": 1,
@@ -147,7 +165,16 @@ def cmd_init(args: argparse.Namespace) -> int:
         )
     discovery_path = workspace / config["files"]["discovery_history"]
     if not discovery_path.exists() or args.force:
-        write_json(discovery_path, {"schema_version": 1, "runs": []})
+        write_json(discovery_path, {"schema_version": 2, "runs": []})
+    pending_leads_path = workspace / config["files"]["pending_job_leads"]
+    if not pending_leads_path.exists() or args.force:
+        write_json(
+            pending_leads_path,
+            {"schema_version": 2, "updated_at": None, "leads": [], "resolved": []},
+        )
+    company_audit_path = workspace / config["files"]["company_audit"]
+    if not company_audit_path.exists() or args.force:
+        write_json(company_audit_path, {"schema_version": 1, "updated_at": None, "companies": {}})
 
     job_book = jobs.export_workbook(workspace) if args.force else jobs.ensure_workbook(workspace)
     weakness_book = weaknesses.ensure_workbook(workspace)
@@ -158,6 +185,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         "weakness_workbook": str(weakness_book),
         "job_state": str(state_path),
         "discovery_history": str(discovery_path),
+        "pending_job_leads": str(pending_leads_path),
+        "company_audit": str(company_audit_path),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -181,7 +210,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     path = config_path(workspace)
     if not path.exists():
         raise SystemExit(f"Workspace is not initialized: {path}")
-    config = json.loads(path.read_text(encoding="utf-8"))
+    config = upgrade_config(json.loads(path.read_text(encoding="utf-8")))
     resume = latest_resume(workspace, config)
     summary = jobs.state_summary(workspace)
     history_path = workspace / config["files"].get("discovery_history", f"{RUNTIME_DIR}/state/discovery-runs.json")
@@ -190,17 +219,64 @@ def cmd_status(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         history = {"runs": []}
     runs = history.get("runs", []) if isinstance(history, dict) else []
+    pending_path = workspace / config["files"].get("pending_job_leads", f"{RUNTIME_DIR}/state/pending-job-leads.json")
+    audit_path = workspace / config["files"].get("company_audit", f"{RUNTIME_DIR}/state/company-audit.json")
+    pending = read_json(pending_path, {"leads": []})
+    audits = read_json(audit_path, {"companies": {}})
     result = {
         "workspace": str(workspace),
         "onboarded": bool(config.get("onboarded")),
         "latest_resume": str(resume) if resume else None,
         "roles": config.get("profile", {}).get("roles", []),
         "role_aliases": config.get("profile", {}).get("role_aliases", {}),
+        "watch_companies": config.get("profile", {}).get("watch_companies", []),
         "schedule": config.get("schedule", {}),
         "jobs": summary,
+        "pending_job_lead_count": len(pending.get("leads", [])) if isinstance(pending, dict) else 0,
+        "pending_company_audit_count": sum(
+            1 for value in audits.get("companies", {}).values()
+            if isinstance(value, dict) and value.get("complete") is not True
+        ) if isinstance(audits, dict) and isinstance(audits.get("companies", {}), dict) else 0,
         "latest_discovery": runs[-1] if runs else None,
         "job_workbook": str(workspace / config["files"]["job_workbook"]),
         "weakness_workbook": str(workspace / config["files"]["weakness_workbook"]),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_migrate(args: argparse.Namespace) -> int:
+    workspace = Path(args.workspace).expanduser().resolve()
+    path = config_path(workspace)
+    if not path.exists():
+        raise SystemExit(f"Workspace is not initialized: {path}")
+    original = json.loads(path.read_text(encoding="utf-8"))
+    config = upgrade_config(original)
+    if config != original:
+        write_json(path, config)
+
+    pending_path = workspace / config["files"]["pending_job_leads"]
+    if not pending_path.exists():
+        write_json(
+            pending_path,
+            {"schema_version": 2, "updated_at": None, "leads": [], "resolved": []},
+        )
+    audit_path = workspace / config["files"]["company_audit"]
+    if not audit_path.exists():
+        write_json(audit_path, {"schema_version": 1, "updated_at": None, "companies": {}})
+    history_path = workspace / config["files"].get(
+        "discovery_history", f"{RUNTIME_DIR}/state/discovery-runs.json"
+    )
+    if not history_path.exists():
+        write_json(history_path, {"schema_version": 2, "runs": []})
+
+    result = {
+        "workspace": str(workspace),
+        "config": str(path),
+        "changed": config != original,
+        "schema_version": config["schema_version"],
+        "pending_job_leads": str(pending_path),
+        "company_audit": str(audit_path),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -211,7 +287,7 @@ def cmd_set_role_aliases(args: argparse.Namespace) -> int:
     path = config_path(workspace)
     if not path.exists():
         raise SystemExit(f"Workspace is not initialized: {path}")
-    config = json.loads(path.read_text(encoding="utf-8"))
+    config = upgrade_config(json.loads(path.read_text(encoding="utf-8")))
     profile = config.setdefault("profile", {})
     roles = profile.get("roles", [])
     updates = parse_role_aliases(args.role_alias or [], roles)
@@ -241,6 +317,8 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--role-alias", action="append", default=[], help="ROLE=ALIAS; repeat as needed")
     init.add_argument("--location", action="append", default=[])
     init.add_argument("--company-type", action="append", default=[])
+    init.add_argument("--watch-company", action="append", default=[], help="Company to audit on every full search")
+    init.add_argument("--include-high-growth-companies", action="store_true")
     init.add_argument("--positive-keyword", action="append", default=[])
     init.add_argument("--fuzzy-keyword", action="append", default=[])
     init.add_argument("--negative-keyword", action="append", default=[])
@@ -255,6 +333,10 @@ def parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Show initialized inputs and generated artifacts")
     status.add_argument("--workspace", required=True)
     status.set_defaults(func=cmd_status)
+
+    migrate = sub.add_parser("migrate", help="Upgrade an existing runtime config and add missing v2 state")
+    migrate.add_argument("--workspace", required=True)
+    migrate.set_defaults(func=cmd_migrate)
 
     aliases = sub.add_parser("set-role-aliases", help="Add or replace job-title aliases for configured roles")
     aliases.add_argument("--workspace", required=True)

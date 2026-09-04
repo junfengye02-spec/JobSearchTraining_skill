@@ -10,6 +10,8 @@ from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
+from configuration import upgrade_config
+
 
 RUNTIME_DIR = ".adaptive-interview-coach"
 SOURCE_GROUPS = (
@@ -41,6 +43,8 @@ SOURCE_GROUPS = (
 VALID_STATUSES = {"success", "empty", "blocked", "error"}
 VALID_MODES = {"initial_full", "daily_refresh"}
 VALID_COMPLETE_STOP_REASONS = {"end", "consecutive_no_new", "page_limit"}
+VALID_AUDIT_STATUSES = {"verified", "no_match", "deferred", "blocked", "error"}
+COMPLETE_AUDIT_STATUSES = {"verified", "no_match"}
 OPEN_APPLICATION_STATUSES = {"open", "currently_open", "可投递", "招聘中", "开放投递"}
 READY_FIELDS = (
     "company", "title", "responsibilities", "source_url", "matched_roles",
@@ -50,6 +54,27 @@ READY_FIELDS = (
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat()
+
+
+def valid_iso_timestamp(value: object) -> bool:
+    raw = text(value)
+    if "T" not in raw:
+        return False
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.utcoffset() is not None
+
+
+def company_audit_is_complete(item: dict) -> bool:
+    return (
+        item.get("status") in COMPLETE_AUDIT_STATUSES
+        and item.get("official_search_attempted") is True
+        and bool(text_list(item.get("queries")))
+        and bool(text_list(item.get("pages_checked")))
+        and valid_iso_timestamp(item.get("checked_at"))
+    )
 
 
 def read_json(path: Path, default: object) -> object:
@@ -70,7 +95,42 @@ def load_config(workspace: Path) -> dict:
     path = workspace / RUNTIME_DIR / "config.json"
     if not path.exists():
         raise SystemExit(f"Workspace is not initialized: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return upgrade_config(json.loads(path.read_text(encoding="utf-8")))
+
+
+def configured_path(workspace: Path, config: dict, key: str, fallback: str) -> Path:
+    value = config.get("files", {}).get(key, fallback)
+    path = Path(value)
+    return path if path.is_absolute() else workspace / path
+
+
+def pending_leads_path(workspace: Path, config: dict) -> Path:
+    return configured_path(
+        workspace, config, "pending_job_leads", f"{RUNTIME_DIR}/state/pending-job-leads.json"
+    )
+
+
+def company_audit_path(workspace: Path, config: dict) -> Path:
+    return configured_path(
+        workspace, config, "company_audit", f"{RUNTIME_DIR}/state/company-audit.json"
+    )
+
+
+def load_pending_leads(workspace: Path, config: dict) -> list[dict]:
+    state = read_json(pending_leads_path(workspace, config), {"leads": []})
+    leads = state.get("leads", []) if isinstance(state, dict) else []
+    return [item for item in leads if isinstance(item, dict)]
+
+
+def load_pending_company_audits(workspace: Path, config: dict) -> list[dict]:
+    state = read_json(company_audit_path(workspace, config), {"companies": {}})
+    companies = state.get("companies", {}) if isinstance(state, dict) else {}
+    if not isinstance(companies, dict):
+        return []
+    return [
+        item for item in companies.values()
+        if isinstance(item, dict) and not company_audit_is_complete(item)
+    ]
 
 
 def text(value: object) -> str:
@@ -90,17 +150,20 @@ def normalize(value: object) -> str:
     return re.sub(r"\s+", " ", text(value)).strip().lower()
 
 
-def role_aliases(profile: dict, role: str) -> list[str]:
+def role_aliases(profile: dict, role: str, limit: int = 8) -> list[str]:
     mapping = profile.get("role_aliases", {})
     aliases = mapping.get(role, []) if isinstance(mapping, dict) else []
-    return list(dict.fromkeys([role, *text_list(aliases)]))[:5]
+    unique_aliases = [item for item in text_list(aliases) if normalize(item) != normalize(role)]
+    return [role, *unique_aliases[:max(0, limit)]]
 
 
 def completed_initial_full(workspace: Path, config: dict) -> bool:
     history = read_json(discovery_history_path(workspace, config), {"runs": []})
     runs = history.get("runs", []) if isinstance(history, dict) else []
     return any(
-        run.get("mode") == "initial_full" and run.get("full_search_complete") is True
+        run.get("schema_version") == 2
+        and run.get("mode") == "initial_full"
+        and run.get("full_search_complete") is True
         for run in runs
         if isinstance(run, dict)
     )
@@ -112,7 +175,12 @@ def resolve_mode(workspace: Path, config: dict, requested: str = "auto") -> str:
     return "daily_refresh" if completed_initial_full(workspace, config) else "initial_full"
 
 
-def query_plan(config: dict, mode: str = "initial_full") -> dict:
+def query_plan(
+    config: dict,
+    mode: str = "initial_full",
+    pending_leads: list[dict] | None = None,
+    pending_company_audits: list[dict] | None = None,
+) -> dict:
     profile = config.get("profile", {})
     grad = text(profile.get("target_grad_year"))
     season = text(profile.get("target_season_label"))
@@ -121,9 +189,18 @@ def query_plan(config: dict, mode: str = "initial_full") -> dict:
     cohort_query = grad or "应届 校招"
     season_query = season or "校园招聘"
     internship_query = "实习 可转正" if include_internships else "正式校招 全职"
+    discovery = config.get("discovery", {})
+    alias_limit = int(discovery.get("max_role_aliases", 8))
+    watch_companies = text_list(profile.get("watch_companies"))
+    retry_companies = list(dict.fromkeys(
+        text(item.get("company"))
+        for item in (pending_company_audits or [])
+        if isinstance(item, dict) and text(item.get("company"))
+    ))
+    company_search_companies = list(dict.fromkeys([*watch_companies, *retry_companies]))
     role_tasks = {group["id"]: [] for group in SOURCE_GROUPS}
     for role in roles:
-        terms = role_aliases(profile, role)
+        terms = role_aliases(profile, role, alias_limit)
         expression = " OR ".join(f'"{term}"' for term in terms)
         common = f'"{cohort_query}" ({expression}) {internship_query}'
         role_tasks["nowcoder"].append({
@@ -134,9 +211,18 @@ def query_plan(config: dict, mode: str = "initial_full") -> dict:
                 f"site:nowcoder.com/discuss {season_query} {common}",
             ],
             "entry_urls": [
-                "https://www.nowcoder.com/search/all?"
-                + urlencode({"query": f"{cohort_query} {term} 校招", "type": "all"})
-                for term in terms
+                "https://www.nowcoder.com/jobs/school/schedule?pageSource=5001",
+                "https://www.nowcoder.com/jobs/recommend/campus",
+                *[
+                    "https://www.nowcoder.com/jobs/school/jobs?"
+                    + urlencode({"search": term})
+                    for term in terms
+                ],
+                *[
+                    "https://www.nowcoder.com/search/all?"
+                    + urlencode({"query": f"{cohort_query} {term} 校招", "type": "all"})
+                    for term in terms
+                ],
             ],
         })
         role_tasks["official"].append({
@@ -146,6 +232,10 @@ def query_plan(config: dict, mode: str = "initial_full") -> dict:
                 f'"校园招聘" "{cohort_query}" ({expression}) 招聘官网',
                 f'"{season_query}" "正式启动" ({expression}) 招聘',
                 f'site:mp.weixin.qq.com "{season_query}" ({expression}) 招聘',
+                *[
+                    f'"{company}" ({expression}) (校招 OR 校园招聘 OR 应届生) 招聘官网'
+                    for company in company_search_companies
+                ],
             ],
             "entry_urls": [],
         })
@@ -173,7 +263,6 @@ def query_plan(config: dict, mode: str = "initial_full") -> dict:
             ],
             "entry_urls": ["https://www.shixiseng.com/interns"],
         })
-    discovery = config.get("discovery", {})
     if mode == "initial_full":
         max_candidates = int(discovery.get("initial_max_candidates_per_source", 50))
         max_pages = int(discovery.get("initial_max_result_pages_per_query", 5))
@@ -196,18 +285,30 @@ def query_plan(config: dict, mode: str = "initial_full") -> dict:
             "max_candidates": max_candidates,
             "max_result_pages_per_query": max_pages,
             "stop_after_consecutive_no_new_pages": no_new_limit,
-            "max_new_company_verifications": max_verifications,
+            "max_new_company_verifications": (
+                None
+                if group["id"] == "nowcoder" and discovery.get("audit_all_nowcoder_companies", True)
+                else max_verifications
+            ),
+            "required_watch_companies": (
+                company_search_companies
+                if group["id"] == "official" else []
+            ),
+            "requires_company_enumeration": group["id"] == "nowcoder",
             "instruction": (
                 "逐个执行role_tasks，不得遗漏用户指定岗位方向或把多个方向合并成一个完成项。"
-                "执行每条计划查询并打开entry_urls；对有分页的结果继续翻页，直到来源明确结束、"
+                "为每条查询填写独立query_runs证据，并逐一打开entry_urls填写entry_runs；"
+                "对有分页的结果继续翻页，直到来源明确结束、"
                 f"连续{no_new_limit}页没有新增，或达到每条查询{max_pages}页的安全上限。"
                 "先广泛收集，再打开职位详情核实完整职责、当前可投状态、可投证据和核验时间。"
                 f"首次最多保留本来源{max_candidates}条相关候选，不得因为找到第一条就停止；"
                 "若命中候选上限，使用candidate_limit停止原因并保持exhausted=false。"
+                "列出本来源发现的每家公司并执行官方招聘搜索；牛客公司列表必须完整枚举，"
+                "无法核验的公司写入company_audits并标记deferred/blocked，不得静默丢弃。"
             ),
         })
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": datetime.now().astimezone().strftime("DISC-%Y%m%d-%H%M%S"),
         "created_at": now_iso(),
         "mode": mode,
@@ -218,6 +319,12 @@ def query_plan(config: dict, mode: str = "initial_full") -> dict:
             "include_internships": include_internships,
             "location_preferences": profile.get("location_preferences", []),
             "company_type_preferences": profile.get("company_type_preferences", []),
+            "watch_companies": watch_companies,
+            "include_high_growth_companies": bool(profile.get("include_high_growth_companies")),
+        },
+        "retry_queue": {
+            "pending_leads": pending_leads or [],
+            "pending_company_audits": pending_company_audits or [],
         },
         "source_groups": tasks,
         "candidate_fields": [
@@ -233,22 +340,55 @@ def query_plan(config: dict, mode: str = "initial_full") -> dict:
                 {
                     "role": "configured role",
                     "status": "success | empty | blocked | error",
-                    "queries": ["all planned queries actually executed"],
-                    "pages_checked": ["search and result pages actually opened"],
-                    "exhausted": "true only after end/no-new-page rule",
-                    "stop_reason": "end | consecutive_no_new | page_limit | candidate_limit | blocked | error",
+                    "query_runs": [{
+                        "query": "one exact planned query",
+                        "status": "success | empty | blocked | error",
+                        "pages_checked": ["search and result pages actually opened"],
+                        "exhausted": "true only after end/no-new-page rule",
+                        "stop_reason": "end | consecutive_no_new | page_limit | candidate_limit | blocked | error",
+                        "error": "required for blocked/error",
+                    }],
                 }
             ],
+            "entry_runs": [{
+                "url": "one exact planned entry URL",
+                "status": "success | empty | blocked | error",
+                "checked_at": "ISO-8601 timestamp",
+                "evidence": "what was visible at this entry point",
+                "error": "required for blocked/error",
+            }],
+            "enumeration_complete": "required true for Nowcoder after all visible companies are listed",
+            "enumerated_companies": ["all companies visible on the source"],
+            "company_audits": [{
+                "company": "company name",
+                "status": "verified | no_match | deferred | blocked | error",
+                "official_search_attempted": "boolean",
+                "queries": ["company-specific official search queries"],
+                "pages_checked": ["official pages/search results opened"],
+                "checked_at": "ISO-8601 timestamp",
+                "error": "required unless verified/no_match",
+            }],
             "error": "required for blocked/error",
             "candidates": ["candidate objects"],
         },
+        "lead_resolution_schema": [{
+            "lead_key": "exact lead_key from retry_queue.pending_leads",
+            "resolution": "closed | duplicate | irrelevant",
+            "evidence": "current evidence supporting removal from retry",
+            "checked_at": "valid timezone-aware ISO-8601 timestamp",
+        }],
     }
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace).expanduser().resolve()
     config = load_config(workspace)
-    plan = query_plan(config, resolve_mode(workspace, config, args.mode))
+    plan = query_plan(
+        config,
+        resolve_mode(workspace, config, args.mode),
+        load_pending_leads(workspace, config),
+        load_pending_company_audits(workspace, config),
+    )
     if args.output:
         write_json(Path(args.output).expanduser().resolve(), plan)
     print(json.dumps(plan, ensure_ascii=False, indent=2))
@@ -260,6 +400,118 @@ def candidate_key(candidate: dict) -> str:
     title = re.sub(r"\s+", "", text(candidate.get("title")).lower())
     url = text(candidate.get("source_url")).rstrip("/")
     return f"{company}|{title}|{url}"
+
+
+def normalize_query_run(
+    raw: dict,
+    expected_query: str,
+    max_pages: int,
+    no_new_page_limit: int,
+) -> dict:
+    status = text(raw.get("status")) or "not_run"
+    pages = text_list(raw.get("pages_checked"))
+    exhausted = raw.get("exhausted") is True
+    stop_reason = text(raw.get("stop_reason"))
+    error = text(raw.get("error"))
+    stop_evidence_complete = (
+        stop_reason == "end"
+        or (stop_reason == "page_limit" and len(pages) >= max_pages)
+        or (
+            stop_reason == "consecutive_no_new"
+            and len(pages) >= no_new_page_limit
+        )
+    )
+    complete = (
+        status in ("success", "empty")
+        and bool(pages)
+        and exhausted
+        and stop_reason in VALID_COMPLETE_STOP_REASONS
+        and stop_evidence_complete
+    )
+    if not complete and not error:
+        reasons = []
+        if status not in VALID_STATUSES:
+            reasons.append("invalid or missing status")
+        if not pages:
+            reasons.append("no visited pages")
+        if not exhausted:
+            reasons.append("pagination not exhausted")
+        if stop_reason not in VALID_COMPLETE_STOP_REASONS:
+            reasons.append("missing or non-completing stop reason")
+        elif not stop_evidence_complete:
+            reasons.append("visited-page evidence does not satisfy stop reason")
+        if status in ("blocked", "error"):
+            reasons.append("query failed")
+        error = "; ".join(reasons) or "query incomplete"
+    return {
+        "query": expected_query,
+        "status": status if status in VALID_STATUSES else "error",
+        "pages_checked": pages,
+        "exhausted": exhausted,
+        "stop_reason": stop_reason,
+        "complete": complete,
+        "error": error,
+    }
+
+
+def normalize_entry_run(raw: dict, expected_url: str) -> dict:
+    status = text(raw.get("status")) or "not_run"
+    checked_at = text(raw.get("checked_at"))
+    evidence = text(raw.get("evidence"))
+    error = text(raw.get("error"))
+    complete = status in ("success", "empty") and valid_iso_timestamp(checked_at) and bool(evidence)
+    if not complete and not error:
+        reasons = []
+        if status not in VALID_STATUSES:
+            reasons.append("invalid or missing status")
+        if not valid_iso_timestamp(checked_at):
+            reasons.append("missing or invalid checked_at")
+        if not evidence:
+            reasons.append("missing evidence")
+        if status in ("blocked", "error"):
+            reasons.append("entry failed")
+        error = "; ".join(reasons) or "entry incomplete"
+    return {
+        "url": expected_url,
+        "status": status if status in VALID_STATUSES else "error",
+        "checked_at": checked_at,
+        "evidence": evidence,
+        "complete": complete,
+        "error": error,
+    }
+
+
+def normalize_company_audit(raw: dict, company: str) -> dict:
+    status = text(raw.get("status")) or "deferred"
+    attempted = raw.get("official_search_attempted") is True
+    queries = text_list(raw.get("queries"))
+    pages = text_list(raw.get("pages_checked"))
+    checked_at = text(raw.get("checked_at"))
+    error = text(raw.get("error"))
+    complete = company_audit_is_complete(raw)
+    if not complete and not error:
+        reasons = []
+        if status not in VALID_AUDIT_STATUSES:
+            reasons.append("invalid status")
+        if not attempted:
+            reasons.append("official search not attempted")
+        if not queries:
+            reasons.append("no company-specific query")
+        if not pages:
+            reasons.append("no official/search page checked")
+        if not valid_iso_timestamp(checked_at):
+            reasons.append("missing or invalid checked_at")
+        error = "; ".join(reasons) or "company audit pending"
+    return {
+        "company": company,
+        "status": status if status in VALID_AUDIT_STATUSES else "error",
+        "official_search_attempted": attempted,
+        "queries": queries,
+        "pages_checked": pages,
+        "checked_at": checked_at,
+        "complete": complete,
+        "error": error,
+    }
 
 
 def normalize_source_results(report: dict, plan: dict) -> tuple[list[dict], list[dict]]:
@@ -279,14 +531,14 @@ def normalize_source_results(report: dict, plan: dict) -> tuple[list[dict], list
         source_candidates = raw.get("candidates", [])
         if not isinstance(source_candidates, list):
             source_candidates = []
+        source_candidates = [item for item in source_candidates if isinstance(item, dict)]
         for candidate in source_candidates:
-            if not isinstance(candidate, dict):
-                continue
             item = candidate.copy()
             item.setdefault("source_group", group["id"])
             item.setdefault("source_platform", group["label"])
             candidates.append(item)
 
+        planned = planned_groups.get(group["id"], {})
         supplied_coverage = raw.get("role_coverage", [])
         if not isinstance(supplied_coverage, list):
             supplied_coverage = []
@@ -297,59 +549,102 @@ def normalize_source_results(report: dict, plan: dict) -> tuple[list[dict], list
         }
         normalized_coverage = []
         coverage_errors = []
-        planned = planned_groups.get(group["id"], {})
         for role_task in planned.get("role_tasks", []):
             role = text(role_task.get("role"))
             coverage = coverage_by_role.get(normalize(role), {})
             role_status = text(coverage.get("status")) or "not_run"
-            queries = coverage.get("queries", []) if isinstance(coverage.get("queries", []), list) else []
-            pages = coverage.get("pages_checked", []) if isinstance(coverage.get("pages_checked", []), list) else []
-            expected = role_task.get("queries", [])
-            actual_queries = {normalize(query) for query in queries if normalize(query)}
-            missing_queries = [query for query in expected if normalize(query) not in actual_queries]
-            exhausted = coverage.get("exhausted") is True
-            stop_reason = text(coverage.get("stop_reason"))
-            role_error = text(coverage.get("error"))
+            supplied_runs = coverage.get("query_runs", [])
+            if not isinstance(supplied_runs, list):
+                supplied_runs = []
+            runs_by_query = {
+                normalize(item.get("query")): item
+                for item in supplied_runs
+                if isinstance(item, dict) and normalize(item.get("query"))
+            }
+            query_runs = [
+                normalize_query_run(
+                    runs_by_query.get(normalize(query), {}),
+                    query,
+                    int(planned.get("max_result_pages_per_query", 1)),
+                    int(planned.get("stop_after_consecutive_no_new_pages", 1)),
+                )
+                for query in role_task.get("queries", [])
+            ]
+            missing_queries = [item["query"] for item in query_runs if not item["complete"]]
             complete = (
                 role_status in ("success", "empty")
-                and bool(queries)
-                and bool(pages)
+                and bool(query_runs)
                 and not missing_queries
-                and exhausted
-                and stop_reason in VALID_COMPLETE_STOP_REASONS
             )
+            role_error = text(coverage.get("error"))
             if not complete:
-                reasons = []
-                if role_status not in VALID_STATUSES:
-                    reasons.append("invalid or missing status")
-                if role_status in ("success", "empty", "not_run"):
-                    if not queries:
-                        reasons.append("no executed queries")
-                    if not pages:
-                        reasons.append("no visited pages")
-                    if missing_queries:
-                        reasons.append(f"{len(missing_queries)} planned queries not executed")
-                    if not exhausted:
-                        reasons.append("pagination not exhausted")
-                    if stop_reason not in VALID_COMPLETE_STOP_REASONS:
-                        reasons.append("missing or non-completing stop reason")
                 if role_status in ("blocked", "error") and not role_error:
-                    reasons.append("missing failure reason")
-                role_error = role_error or "; ".join(reasons) or "role search incomplete"
+                    role_error = "missing failure reason"
+                role_error = role_error or f"{len(missing_queries)} planned query runs incomplete"
                 coverage_errors.append(f"{role}: {role_error}")
             normalized_coverage.append({
                 "role": role,
                 "status": role_status if role_status in VALID_STATUSES else "error",
-                "queries": queries,
-                "pages_checked": pages,
-                "exhausted": exhausted,
-                "stop_reason": stop_reason,
+                "query_runs": query_runs,
                 "missing_planned_queries": missing_queries,
                 "complete": complete,
                 "error": role_error,
             })
 
-        coverage_complete = bool(normalized_coverage) and all(item["complete"] for item in normalized_coverage)
+        supplied_entries = raw.get("entry_runs", [])
+        if not isinstance(supplied_entries, list):
+            supplied_entries = []
+        entries_by_url = {
+            text(item.get("url")): item
+            for item in supplied_entries
+            if isinstance(item, dict) and text(item.get("url"))
+        }
+        entry_runs = [
+            normalize_entry_run(entries_by_url.get(url, {}), url)
+            for url in planned.get("entry_urls", [])
+        ]
+        entry_coverage_complete = all(item["complete"] for item in entry_runs)
+        if not entry_coverage_complete:
+            coverage_errors.append(
+                f"{sum(1 for item in entry_runs if not item['complete'])} planned entry URLs incomplete"
+            )
+
+        enumerated_companies = text_list(raw.get("enumerated_companies"))
+        enumeration_complete = raw.get("enumeration_complete") is True
+        supplied_audits = raw.get("company_audits", [])
+        if not isinstance(supplied_audits, list):
+            supplied_audits = []
+        required_companies = list(dict.fromkeys([
+            *text_list(planned.get("required_watch_companies")),
+            *enumerated_companies,
+            *[text(item.get("company")) for item in source_candidates if text(item.get("company"))],
+            *[
+                text(item.get("company")) for item in supplied_audits
+                if isinstance(item, dict) and text(item.get("company"))
+            ],
+        ]))
+        audits_by_company = {
+            normalize(item.get("company")): item
+            for item in supplied_audits
+            if isinstance(item, dict) and normalize(item.get("company"))
+        }
+        company_audits = [
+            normalize_company_audit(audits_by_company.get(normalize(company), {}), company)
+            for company in required_companies
+        ]
+        company_audit_complete = all(item["complete"] for item in company_audits)
+        if planned.get("requires_company_enumeration") and not enumeration_complete:
+            company_audit_complete = False
+            coverage_errors.append("Nowcoder company enumeration incomplete")
+        if not company_audit_complete:
+            coverage_errors.append(
+                f"{sum(1 for item in company_audits if not item['complete'])} company audits incomplete"
+            )
+
+        role_coverage_complete = bool(normalized_coverage) and all(
+            item["complete"] for item in normalized_coverage
+        )
+        coverage_complete = role_coverage_complete and entry_coverage_complete and company_audit_complete
         if coverage_complete:
             status = "success" if source_candidates else "empty"
             error = ""
@@ -364,9 +659,14 @@ def normalize_source_results(report: dict, plan: dict) -> tuple[list[dict], list
             "label": group["label"],
             "status": status,
             "coverage_complete": coverage_complete,
+            "role_coverage_complete": role_coverage_complete,
+            "entry_coverage_complete": entry_coverage_complete,
+            "company_audit_complete": company_audit_complete,
             "role_coverage": normalized_coverage,
-            "queries": list(dict.fromkeys(query for item in normalized_coverage for query in item["queries"])),
-            "pages_checked": list(dict.fromkeys(page for item in normalized_coverage for page in item["pages_checked"])),
+            "entry_runs": entry_runs,
+            "enumeration_complete": enumeration_complete,
+            "enumerated_companies": enumerated_companies,
+            "company_audits": company_audits,
             "error": error,
             "candidate_count": len(source_candidates),
         })
@@ -387,6 +687,8 @@ def dedupe_candidates(candidates: list[dict]) -> list[dict]:
 
 def candidate_readiness(candidate: dict) -> list[str]:
     reasons = [f"missing {field}" for field in READY_FIELDS if not text(candidate.get(field))]
+    if text(candidate.get("checked_at")) and not valid_iso_timestamp(candidate.get("checked_at")):
+        reasons.append("invalid checked_at")
     status = normalize(candidate.get("application_status"))
     if status and status not in OPEN_APPLICATION_STATUSES:
         reasons.append("application status is not open")
@@ -419,9 +721,10 @@ def discovery_history_path(workspace: Path, config: dict) -> Path:
 
 def record_run(workspace: Path, config: dict, status: dict) -> None:
     path = discovery_history_path(workspace, config)
-    history = read_json(path, {"schema_version": 1, "runs": []})
+    history = read_json(path, {"schema_version": 2, "runs": []})
     if not isinstance(history, dict):
-        history = {"schema_version": 1, "runs": []}
+        history = {"schema_version": 2, "runs": []}
+    history["schema_version"] = 2
     runs = history.setdefault("runs", [])
     runs.append(status)
     retention = int(config.get("discovery", {}).get("history_retention_runs", 30))
@@ -429,11 +732,107 @@ def record_run(workspace: Path, config: dict, status: dict) -> None:
     write_json(path, history)
 
 
+def persist_pending_leads(
+    workspace: Path,
+    config: dict,
+    report: dict,
+    ready: list[dict],
+    leads: list[dict],
+) -> list[dict]:
+    path = pending_leads_path(workspace, config)
+    state = read_json(path, {"leads": [], "resolved": []})
+    existing = state.get("leads", []) if isinstance(state, dict) else []
+    if not isinstance(existing, list):
+        existing = []
+    by_key = {candidate_key(item): item for item in existing if candidate_key(item) != "||"}
+    supplied_resolutions = report.get("lead_resolutions", [])
+    if not isinstance(supplied_resolutions, list):
+        supplied_resolutions = []
+    valid_resolutions = {}
+    for item in supplied_resolutions:
+        if not isinstance(item, dict):
+            continue
+        key = text(item.get("lead_key"))
+        resolution = text(item.get("resolution"))
+        evidence = text(item.get("evidence"))
+        checked_at = text(item.get("checked_at"))
+        if (
+            key
+            and resolution in {"closed", "duplicate", "irrelevant"}
+            and evidence
+            and valid_iso_timestamp(checked_at)
+        ):
+            saved = item.copy()
+            saved["resolved_at"] = now_iso()
+            valid_resolutions[key] = saved
+    resolution_history = state.get("resolved", []) if isinstance(state, dict) else []
+    if not isinstance(resolution_history, list):
+        resolution_history = []
+    resolved_keys = {
+        text(item.get("lead_key"))
+        for item in resolution_history
+        if isinstance(item, dict) and text(item.get("lead_key"))
+    }
+    resolved_keys.update(valid_resolutions)
+    resolved_keys.update(candidate_key(item) for item in ready)
+    for key in resolved_keys:
+        by_key.pop(key, None)
+    for item in leads:
+        key = candidate_key(item)
+        if key != "||" and key not in resolved_keys:
+            saved = item.copy()
+            saved["lead_key"] = key
+            saved["last_seen_at"] = now_iso()
+            by_key[key] = saved
+    pending = list(by_key.values())
+    resolution_history.extend(valid_resolutions.values())
+    write_json(
+        path,
+        {
+            "schema_version": 2,
+            "updated_at": now_iso(),
+            "leads": pending,
+            "resolved": resolution_history[-500:],
+        },
+    )
+    return pending
+
+
+def persist_company_audits(workspace: Path, config: dict, sources: list[dict]) -> list[dict]:
+    path = company_audit_path(workspace, config)
+    state = read_json(path, {"schema_version": 1, "companies": {}})
+    existing = state.get("companies", {}) if isinstance(state, dict) else {}
+    if not isinstance(existing, dict):
+        existing = {}
+    for source in sources:
+        for audit in source.get("company_audits", []):
+            company = text(audit.get("company"))
+            if not company:
+                continue
+            saved = audit.copy()
+            saved["source_group"] = source.get("id")
+            saved["last_seen_at"] = now_iso()
+            existing[normalize(company)] = saved
+    write_json(
+        path,
+        {"schema_version": 1, "updated_at": now_iso(), "companies": existing},
+    )
+    return [
+        item for item in existing.values()
+        if isinstance(item, dict) and not company_audit_is_complete(item)
+    ]
+
+
 def finalize_report(workspace: Path, report: dict) -> tuple[dict, list[dict], list[dict]]:
     config = load_config(workspace)
     requested_mode = text(report.get("mode"))
     mode = resolve_mode(workspace, config, requested_mode if requested_mode in VALID_MODES else "auto")
-    plan = query_plan(config, mode)
+    plan = query_plan(
+        config,
+        mode,
+        load_pending_leads(workspace, config),
+        load_pending_company_audits(workspace, config),
+    )
     sources, candidates = normalize_source_results(report, plan)
     candidates = dedupe_candidates(candidates)
     ready = []
@@ -446,9 +845,16 @@ def finalize_report(workspace: Path, report: dict) -> tuple[dict, list[dict], li
             leads.append(lead)
         else:
             ready.append(item)
+    pending_leads = persist_pending_leads(workspace, config, report, ready, leads)
+    pending_company_audits = persist_company_audits(workspace, config, sources)
     successful = [source for source in sources if source["coverage_complete"]]
     blocked = [source for source in sources if not source["coverage_complete"]]
-    coverage_complete = len(successful) == len(SOURCE_GROUPS)
+    source_coverage_complete = len(successful) == len(SOURCE_GROUPS)
+    coverage_complete = (
+        source_coverage_complete
+        and not pending_leads
+        and not pending_company_audits
+    )
     can_report_no_jobs = not ready and coverage_complete
     if ready and coverage_complete:
         conclusion = "jobs_found"
@@ -468,12 +874,13 @@ def finalize_report(workspace: Path, report: dict) -> tuple[dict, list[dict], li
     }
     low_yield_threshold = int(config.get("discovery", {}).get("initial_low_yield_threshold", 5))
     status = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": text(report.get("run_id")) or datetime.now().astimezone().strftime("DISC-%Y%m%d-%H%M%S"),
         "finished_at": now_iso(),
         "mode": mode,
         "conclusion": conclusion,
         "coverage_complete": coverage_complete,
+        "source_coverage_complete": source_coverage_complete,
         "full_search_complete": mode == "initial_full" and coverage_complete,
         "can_report_no_jobs": can_report_no_jobs,
         "successful_source_count": len(successful),
@@ -481,6 +888,8 @@ def finalize_report(workspace: Path, report: dict) -> tuple[dict, list[dict], li
         "candidate_count": len(candidates),
         "ready_candidate_count": len(ready),
         "lead_count": len(leads),
+        "pending_lead_count": len(pending_leads),
+        "pending_company_audit_count": len(pending_company_audits),
         "role_candidate_counts": role_candidate_counts,
         "roles_without_open_candidates": [role for role, count in role_candidate_counts.items() if count == 0],
         "low_yield": mode == "initial_full" and len(ready) < low_yield_threshold,
@@ -533,11 +942,15 @@ def cmd_report(args: argparse.Namespace) -> int:
     if run.get("conclusion") == "blocked":
         print("岗位发现被阻塞：所有来源均未成功执行，不能报告‘没有岗位’。")
     elif run.get("conclusion") == "partial_inconclusive":
-        print("岗位发现仅部分完成，结果不完整，不能报告‘没有岗位’。")
+        print(
+            "岗位发现仅部分完成，结果不完整，不能报告‘没有岗位’。"
+            f"待核实线索 {run.get('pending_lead_count', 0)} 条，"
+            f"待完成企业审计 {run.get('pending_company_audit_count', 0)} 家。"
+        )
     elif run.get("conclusion") == "jobs_found_incomplete":
         print(
             f"已核实 {run.get('ready_candidate_count', 0)} 个当前可投岗位，"
-            "但岗位方向或来源覆盖尚未完成，必须继续扩搜，不能报告刷新完成。"
+            "但岗位方向、来源或持久化重试队列尚未完成，必须继续扩搜，不能报告刷新完成。"
         )
     elif run.get("conclusion") == "searched_no_jobs":
         print("四路来源和全部目标岗位方向均已搜索到耗尽，本轮未发现当前可投岗位。")
@@ -552,6 +965,11 @@ def cmd_report(args: argparse.Namespace) -> int:
         print("## 岗位方向")
         for role, count in role_counts.items():
             print(f"- {role}: 当前可投 {count} 个")
+    print()
+    print(
+        f"待核实线索：{run.get('pending_lead_count', 0)}；"
+        f"待完成企业审计：{run.get('pending_company_audit_count', 0)}。"
+    )
     print()
     print("## 来源状态")
     for source in run.get("sources", []):

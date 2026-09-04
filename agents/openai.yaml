@@ -1,7 +1,7 @@
 interface:
   display_name: "Adaptive Interview Coach"
   short_description: "Discover jobs, train interviews, and review weaknesses"
-  default_prompt: "Use $adaptive-interview-coach to start everything now: exhaustively find and verify currently open jobs for every requested role, build both Excel workbooks, schedule daily automations, and open my first interview task."
+  default_prompt: "$adaptive-interview-coach 开始skill：先创建每日搜岗与面试自动化，再完成全量岗位回填、更新两份 Excel，并打开首个面试任务。"
 
 policy:
   allow_implicit_invocation: true
